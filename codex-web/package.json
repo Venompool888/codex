@@ -9,10 +9,12 @@
   "scripts": {
     "dev": "concurrently \"tsx watch server.ts\" \"vite\"",
     "build": "vite build",
-    "start": "tsx server.ts"
+    "start": "tsx server.ts",
+    "test": "playwright test"
   },
   "dependencies": {
     "@openai/codex-sdk": "workspace:*",
+    "dompurify": "^3.4.1",
     "express": "^4.21.2",
     "marked": "^18.0.2",
     "react": "^18.3.1",

@@ -41,10 +41,19 @@ function FileApproval({ req, decide }: { req: Extract<ApprovalRequest, { kind: "
     <>
       <div className="modal-title">📄 文件修改请求</div>
       {req.reason && <div className="modal-reason">{req.reason}</div>}
+      {req.grantRoot && (
+        <>
+          <div className="modal-section-label">授权目录</div>
+          <code className="modal-cwd">{req.grantRoot}</code>
+        </>
+      )}
       {req.changes.length > 0 && (
         <div className="modal-changes">
           {req.changes.map((c, i) => <DiffBlock key={i} change={c} />)}
         </div>
+      )}
+      {req.changes.length === 0 && (
+        <div className="modal-reason">还没有收到结构化 diff。可以等待流式 diff 更新，也可以直接拒绝。</div>
       )}
       <div className="modal-actions">
         <button className="btn-approve" onClick={() => decide("accept")}>允许</button>

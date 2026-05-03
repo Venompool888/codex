@@ -2,29 +2,46 @@ import { useEffect, useRef, useState, KeyboardEvent, useCallback } from "react";
 import { useCodexWs, ChatEntry, TurnEntry } from "./useCodexWs";
 import { ApprovalModal } from "./ApprovalModal";
 import { SlashMenu } from "./SlashMenu";
-import type { AppItem, TokenUsage, ReasoningEffort, ModelInfo } from "../shared";
+import type {
+  AppItem, ConfigKey, ConfigState, FileMention, FileSearchResult,
+  InputRequest, JsonValue, McpElicitationRequest, McpServerSummary,
+  TokenUsage, ReasoningEffort, ModelInfo, ThreadSummary,
+} from "../shared";
 import { marked } from "marked";
+import DOMPurify from "dompurify";
 
-// Configure marked for safety
+// Configure Markdown rendering; HTML is sanitized before insertion.
 marked.setOptions({ async: false, breaks: true, gfm: true });
 
 export default function App() {
   const {
     connected, thinking, threadId, model, effort, models, cwd, entries, approval,
-    send, interrupt, newThread, respond, slash,
-    changeModel, changeEffort, listModels,
+    threads, fileSearchResults, config, mcpServers, inputRequest, mcpElicitation,
+    send, interrupt, newThread, listThreads, resumeThread, respond, respondInput, respondMcpElicitation,
+    slash, searchFiles,
+    changeModel, changeEffort, listModels, readConfig, writeConfig, listMcp,
     historyUp, historyDown, resetHistoryIdx,
   } = useCodexWs();
 
   const [input, setInput] = useState("");
+  const [mentions, setMentions] = useState<FileMention[]>([]);
   const [showSlash, setShowSlash] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
+  const [showThreads, setShowThreads] = useState(true);
+  const [showConfig, setShowConfig] = useState(false);
+  const [showMcp, setShowMcp] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [entries, thinking]);
+
+  const activeMention = mentionQuery(input);
+  useEffect(() => {
+    if (activeMention) searchFiles(activeMention.query);
+    else searchFiles("");
+  }, [activeMention?.query, searchFiles]);
 
   function handleSubmit() {
     const text = input.trim();
@@ -33,15 +50,18 @@ export default function App() {
     // slash commands
     if (text.startsWith("/")) {
       const [cmd, ...rest] = text.slice(1).split(" ");
-      if (cmd === "new" || cmd === "clear") { setInput(""); newThread(); return; }
+      if (cmd === "new" || cmd === "clear") { setInput(""); setMentions([]); newThread(); return; }
       setInput("");
+      setMentions([]);
       slash(cmd, rest.join(" "));
       return;
     }
 
     if (thinking) return;
     setInput("");
-    send(text);
+    const outgoingMentions = mentions.filter(m => text.includes(`@${m.name}`) || text.includes(m.path));
+    setMentions([]);
+    send(text, outgoingMentions);
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -69,8 +89,20 @@ export default function App() {
     setShowSlash(v.startsWith("/") && !v.includes(" "));
   }
 
+  function onMentionSelect(file: FileSearchResult) {
+    const token = mentionQuery(input);
+    if (!token) return;
+    const absolutePath = file.path.startsWith("/") ? file.path : `${file.root.replace(/\/$/, "")}/${file.path}`;
+    const next = `${input.slice(0, token.start)}@${file.name} ${input.slice(token.end)}`;
+    setInput(next);
+    setMentions(prev => [...prev.filter(m => m.path !== absolutePath), { name: file.name, path: absolutePath }]);
+    searchFiles("");
+    textareaRef.current?.focus();
+  }
+
   function onSlashSelect(name: string) {
     setShowSlash(false);
+    setMentions([]);
     if (name === "new") { setInput(""); newThread(); return; }
     setInput("");
     slash(name, "");
@@ -81,7 +113,17 @@ export default function App() {
     setShowModelPicker(true);
   }
 
-  const shortCwd = cwd.replace(process.env.HOME ?? "/root", "~");
+  function openConfig() {
+    readConfig();
+    setShowConfig(true);
+  }
+
+  function openMcp() {
+    listMcp();
+    setShowMcp(true);
+  }
+
+  const shortCwd = cwd.replace(/^\/root(?=\/|$)/, "~");
 
   return (
     <div className="app">
@@ -97,63 +139,114 @@ export default function App() {
         <span className="hinfo cwd" title={cwd}>{shortCwd}</span>
         {threadId && <><span className="hsep">·</span><span className="hinfo mono">#{threadId.slice(0, 8)}</span></>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button className="btn-icon" onClick={() => { listThreads(); setShowThreads(v => !v); }} title="线程历史" disabled={!connected}>☰</button>
+          <button className="btn-icon" onClick={openConfig} title="配置" disabled={!connected}>⚙</button>
+          <button className="btn-icon" onClick={openMcp} title="MCP 状态" disabled={!connected}>◈</button>
           <button className="btn-icon" onClick={newThread} title="/new" disabled={!connected}>＋</button>
           <button className="btn-icon" onClick={() => slash("diff")} title="/diff" disabled={!connected}>±</button>
           <button className="btn-icon" onClick={() => slash("status")} title="/status" disabled={!connected}>ⓘ</button>
         </div>
       </header>
 
-      <div className="messages">
-        {entries.length === 0 && (
-          <div className="empty">
-            <p>Codex Web</p>
-            <p className="empty-hint">输入消息开始，<code>/</code> 触发命令补全</p>
-            <div className="empty-suggestions">
-              {["解释当前目录结构", "查看 git 状态", "有哪些 TODO"].map(s => (
-                <button key={s} className="suggestion-chip" onClick={() => { send(s); }}>
-                  {s}
-                </button>
-              ))}
-            </div>
+      <div className="workbench">
+        {showThreads && (
+          <ThreadSidebar
+            threads={threads}
+            currentThreadId={threadId}
+            onRefresh={listThreads}
+            onResume={resumeThread}
+            disabled={!connected || thinking}
+          />
+        )}
+
+        <main className="main-panel">
+          <div className="messages">
+            {entries.length === 0 && (
+              <div className="empty">
+                <p>Codex Web</p>
+                <p className="empty-hint">输入消息开始，<code>/</code> 触发命令补全，<code>@</code> 引用文件</p>
+                <div className="empty-suggestions">
+                  {["解释当前目录结构", "查看 git 状态", "有哪些 TODO"].map(s => (
+                    <button
+                      key={s}
+                      className="suggestion-chip"
+                      onClick={() => { send(s); }}
+                      disabled={!connected || thinking}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {entries.map(e =>
+              e.kind === "user" ? <UserBubble key={e.id} text={e.text} mentions={e.mentions} /> :
+              e.kind === "slash" ? <SlashResult key={e.id} name={e.name} content={e.content} /> :
+              <TurnBlock key={e.id} turn={e} />
+            )}
+            {thinking && <ThinkingDots />}
+            <div ref={bottomRef} />
           </div>
-        )}
-        {entries.map(e =>
-          e.kind === "user" ? <UserBubble key={e.id} text={e.text} /> :
-          e.kind === "slash" ? <SlashResult key={e.id} name={e.name} content={e.content} /> :
-          <TurnBlock key={e.id} turn={e} />
-        )}
-        {thinking && <ThinkingDots />}
-        <div ref={bottomRef} />
+
+          <footer>
+            <div className="input-wrap">
+              {showSlash && (
+                <SlashMenu
+                  query={input.slice(1)}
+                  onSelect={onSlashSelect}
+                  onClose={() => setShowSlash(false)}
+                />
+              )}
+              {activeMention && fileSearchResults.length > 0 && (
+                <FileMentionMenu files={fileSearchResults} onSelect={onMentionSelect} />
+              )}
+              <form className="input-bar" onSubmit={e => { e.preventDefault(); handleSubmit(); }}>
+                <div className="composer-main">
+                  {mentions.length > 0 && (
+                    <div className="mention-chips">
+                      {mentions.map(m => (
+                        <span key={m.path} className="mention-chip" title={m.path}>@{m.name}</span>
+                      ))}
+                    </div>
+                  )}
+                  <textarea
+                    ref={textareaRef}
+                    value={input}
+                    onChange={e => handleInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder={thinking ? "AI 思考中..." : "输入消息，/ 命令，@ 文件，↑↓ 历史"}
+                    rows={1}
+                    disabled={!connected}
+                  />
+                </div>
+                {thinking
+                  ? <button type="button" className="btn-interrupt" onClick={interrupt} title="中断">■</button>
+                  : <button type="submit" className="btn-send" disabled={!connected || !input.trim()}>发送</button>
+                }
+              </form>
+            </div>
+          </footer>
+        </main>
       </div>
 
-      <footer>
-        <div className="input-wrap">
-          {showSlash && (
-            <SlashMenu
-              query={input.slice(1)}
-              onSelect={onSlashSelect}
-              onClose={() => setShowSlash(false)}
-            />
-          )}
-          <form className="input-bar" onSubmit={e => { e.preventDefault(); handleSubmit(); }}>
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={e => handleInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={thinking ? "AI 思考中..." : "输入消息，/ 命令，↑↓ 历史"}
-              rows={1}
-              disabled={!connected}
-            />
-            {thinking
-              ? <button type="button" className="btn-interrupt" onClick={interrupt} title="中断">■</button>
-              : <button type="submit" className="btn-send" disabled={!connected || !input.trim()}>发送</button>
-            }
-          </form>
-        </div>
-      </footer>
-
       {approval && <ApprovalModal req={approval} onDecide={respond} />}
+      {inputRequest && <InputRequestModal request={inputRequest} onSubmit={respondInput} />}
+      {mcpElicitation && <McpElicitationModal request={mcpElicitation} onRespond={respondMcpElicitation} />}
+      {showConfig && config && (
+        <ConfigPanel
+          config={config}
+          onWrite={writeConfig}
+          onRefresh={readConfig}
+          onClose={() => setShowConfig(false)}
+        />
+      )}
+      {showMcp && (
+        <McpPanel
+          servers={mcpServers}
+          onRefresh={listMcp}
+          onClose={() => setShowMcp(false)}
+        />
+      )}
 
       {showModelPicker && (
         <ModelPicker
@@ -168,11 +261,16 @@ export default function App() {
 }
 
 // ── Entry components ──────────────────────────────────────────────────────────
-function UserBubble({ text }: { text: string }) {
+function UserBubble({ text, mentions }: { text: string; mentions: FileMention[] }) {
   return (
     <div className="entry user-entry">
       <div className="elabel">你</div>
       <div className="user-bubble-wrap">
+        {mentions.length > 0 && (
+          <div className="user-mentions">
+            {mentions.map(m => <span key={m.path} title={m.path}>@{m.name}</span>)}
+          </div>
+        )}
         <pre className="user-text">{text}</pre>
         <CopyBtn text={text} />
       </div>
@@ -220,7 +318,9 @@ function CopyBtn({ text }: { text: string }) {
 }
 
 function AgentMsg({ text }: { text: string }) {
-  const html = marked.parse(text) as string;
+  const html = DOMPurify.sanitize(marked.parse(text) as string, {
+    USE_PROFILES: { html: true },
+  });
   return (
     <div className="item agent-msg">
       <span className="agent-msg-header"><CopyBtn text={text} /></span>
@@ -263,7 +363,7 @@ function ItemView({ item }: { item: AppItem }) {
           <div className="iheader">
             <span className="iicon">📄</span>
             <span>文件修改</span>
-            <span className="ibadge">{item.status === "completed" ? "✓" : "✗"}</span>
+            <span className="ibadge">{fileBadge(item.status)}</span>
           </div>
           {item.changes.map((c, i) => (
             <div key={i} className="file-item">
@@ -288,6 +388,11 @@ function ItemView({ item }: { item: AppItem }) {
             <code>{item.server} · {item.tool}</code>
             <span className="ibadge">{item.status === "in_progress" ? "…" : item.status === "completed" ? "✓" : "✗"}</span>
           </div>
+          {item.progress && item.progress.length > 0 && (
+            <div className="mcp-progress">
+              {item.progress.map((line, i) => <div key={i}>{line}</div>)}
+            </div>
+          )}
           {item.error && <pre className="cmd-out err">{item.error}</pre>}
         </div>
       );
@@ -348,6 +453,13 @@ function cmdBadge(status: string, exit: number | null, ms: number | null) {
   return status;
 }
 
+function fileBadge(status: string) {
+  if (status === "running" || status === "pending") return "…";
+  if (status === "completed") return "✓";
+  if (status === "declined") return "已拒绝";
+  return "✗";
+}
+
 function renderDiffLines(diff: string): React.ReactNode {
   return diff.split("\n").map((line, i) => {
     const cls = line.startsWith("+") && !line.startsWith("+++") ? "diff-add"
@@ -355,6 +467,304 @@ function renderDiffLines(diff: string): React.ReactNode {
       : line.startsWith("@@") ? "diff-hunk" : "diff-ctx";
     return <span key={i} className={cls}>{line + "\n"}</span>;
   });
+}
+
+// ── Side panels and request modals ───────────────────────────────────────────
+function ThreadSidebar({ threads, currentThreadId, onRefresh, onResume, disabled }: {
+  threads: ThreadSummary[];
+  currentThreadId: string | null;
+  onRefresh: () => void;
+  onResume: (id: string) => void;
+  disabled: boolean;
+}) {
+  return (
+    <aside className="thread-sidebar">
+      <div className="side-title">
+        <span>线程</span>
+        <button className="mini-btn" onClick={onRefresh} disabled={disabled}>刷新</button>
+      </div>
+      <div className="thread-list">
+        {threads.length === 0 && <div className="side-empty">暂无历史</div>}
+        {threads.map(thread => (
+          <button
+            key={thread.id}
+            className={`thread-row ${thread.id === currentThreadId ? "active" : ""}`}
+            onClick={() => onResume(thread.id)}
+            disabled={disabled || thread.id === currentThreadId}
+            title={thread.cwd}
+          >
+            <span className="thread-title">{thread.name || thread.preview || "未命名线程"}</span>
+            <span className="thread-meta">{formatDate(thread.updatedAt)} · {thread.status}</span>
+            <span className="thread-id">#{thread.id.slice(0, 8)}</span>
+          </button>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function FileMentionMenu({ files, onSelect }: {
+  files: FileSearchResult[];
+  onSelect: (file: FileSearchResult) => void;
+}) {
+  return (
+    <div className="file-mention-menu">
+      {files.map(file => (
+        <button key={`${file.root}:${file.path}`} className="file-mention-item" onClick={() => onSelect(file)} type="button">
+          <span className="file-name">@{file.name}</span>
+          <span className="file-path">{file.path}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ConfigPanel({ config, onWrite, onRefresh, onClose }: {
+  config: ConfigState;
+  onWrite: (key: ConfigKey, value: string) => void;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
+  const [draftModel, setDraftModel] = useState(config.model);
+
+  useEffect(() => setDraftModel(config.model), [config.model]);
+
+  return (
+    <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal panel-modal">
+        <div className="panel-title">
+          <span>配置</span>
+          <button className="mini-btn" onClick={onRefresh}>刷新</button>
+        </div>
+        <label className="config-field">
+          <span>默认模型</span>
+          <div className="inline-edit">
+            <input value={draftModel} onChange={e => setDraftModel(e.target.value)} />
+            <button className="mini-btn" onClick={() => onWrite("model", draftModel)}>保存</button>
+          </div>
+        </label>
+        <ConfigSelect label="默认推理力度" value={config.modelReasoningEffort} options={["none", "minimal", "low", "medium", "high", "xhigh"]} onChange={v => onWrite("model_reasoning_effort", v)} />
+        <ConfigSelect label="审批策略" value={config.approvalPolicy} options={["untrusted", "on-failure", "on-request", "never"]} onChange={v => onWrite("approval_policy", v)} />
+        <ConfigSelect label="沙箱模式" value={config.sandboxMode} options={["read-only", "workspace-write", "danger-full-access"]} onChange={v => onWrite("sandbox_mode", v)} />
+        <ConfigSelect label="Web Search" value={config.webSearch} options={["disabled", "cached", "live"]} onChange={v => onWrite("web_search", v)} />
+        <div className="modal-actions">
+          <button className="btn-reject" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfigSelect({ label, value, options, onChange }: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="config-field">
+      <span>{label}</span>
+      <select value={value} onChange={e => onChange(e.target.value)}>
+        {options.map(option => <option key={option} value={option}>{option}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function McpPanel({ servers, onRefresh, onClose }: {
+  servers: McpServerSummary[];
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal panel-modal">
+        <div className="panel-title">
+          <span>MCP 状态</span>
+          <button className="mini-btn" onClick={onRefresh}>刷新</button>
+        </div>
+        {servers.length === 0 && <div className="side-empty">没有 MCP server</div>}
+        {servers.map(server => (
+          <div key={server.name} className="mcp-server-row">
+            <div className="mcp-server-head">
+              <strong>{server.name}</strong>
+              <span>{server.startupStatus ?? "configured"}</span>
+            </div>
+            <div className="mcp-server-meta">
+              auth: {server.authStatus} · tools: {server.tools.length} · resources: {server.resourceCount}
+              {server.resourceTemplateCount > 0 && ` · templates: ${server.resourceTemplateCount}`}
+            </div>
+            {server.tools.length > 0 && (
+              <div className="mcp-tools">{server.tools.slice(0, 8).map(tool => <code key={tool}>{tool}</code>)}</div>
+            )}
+            {server.error && <pre className="cmd-out err">{server.error}</pre>}
+          </div>
+        ))}
+        <div className="modal-actions">
+          <button className="btn-reject" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InputRequestModal({ request, onSubmit }: {
+  request: InputRequest;
+  onSubmit: (id: string, answers: Record<string, string[]>) => void;
+}) {
+  const [answers, setAnswers] = useState<Record<string, string[]>>({});
+
+  function setAnswer(id: string, value: string) {
+    setAnswers(prev => ({ ...prev, [id]: [value] }));
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal">
+        <div className="modal-title">{request.title}</div>
+        {request.questions.map(q => (
+          <div key={q.id} className="input-question">
+            <div className="modal-section-label">{q.header || q.id}</div>
+            <div className="question-text">{q.question}</div>
+            {q.options && q.options.length > 0 ? (
+              <div className="option-list">
+                {q.options.map(option => (
+                  <button
+                    key={option.label}
+                    className={`option-btn ${(answers[q.id] ?? []).includes(option.label) ? "active" : ""}`}
+                    onClick={() => setAnswer(q.id, option.label)}
+                  >
+                    <span>{option.label}</span>
+                    {option.description && <small>{option.description}</small>}
+                  </button>
+                ))}
+                {q.isOther && (
+                  <input
+                    className="answer-input"
+                    placeholder="其他"
+                    onChange={e => setAnswer(q.id, e.target.value)}
+                  />
+                )}
+              </div>
+            ) : (
+              <input
+                className="answer-input"
+                type={q.isSecret ? "password" : "text"}
+                onChange={e => setAnswer(q.id, e.target.value)}
+              />
+            )}
+          </div>
+        ))}
+        <div className="modal-actions">
+          <button className="btn-approve" onClick={() => onSubmit(request.id, answers)}>提交</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function McpElicitationModal({ request, onRespond }: {
+  request: McpElicitationRequest;
+  onRespond: (id: string, action: "accept" | "decline" | "cancel", content: JsonValue | null) => void;
+}) {
+  const [values, setValues] = useState<Record<string, JsonValue>>({});
+  const fields = request.mode === "form" ? schemaFields(request.requestedSchema) : [];
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal">
+        <div className="modal-title">MCP 请求 · {request.serverName}</div>
+        <div className="modal-reason">{request.message}</div>
+        {request.mode === "url" ? (
+          <a className="external-link" href={request.url} target="_blank" rel="noreferrer">{request.url}</a>
+        ) : (
+          fields.map(field => (
+            <label key={field.name} className="config-field">
+              <span>{field.title || field.name}</span>
+              {field.description && <small>{field.description}</small>}
+              {field.options.length > 0 ? (
+                <select value={String(values[field.name] ?? field.defaultValue ?? "")} onChange={e => setValues(prev => ({ ...prev, [field.name]: e.target.value }))}>
+                  <option value="">选择</option>
+                  {field.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              ) : field.type === "boolean" ? (
+                <select value={String(values[field.name] ?? field.defaultValue ?? "false")} onChange={e => setValues(prev => ({ ...prev, [field.name]: e.target.value === "true" }))}>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              ) : (
+                <input
+                  type={field.type === "number" ? "number" : "text"}
+                  value={String(values[field.name] ?? field.defaultValue ?? "")}
+                  onChange={e => setValues(prev => ({ ...prev, [field.name]: field.type === "number" ? Number(e.target.value) : e.target.value }))}
+                />
+              )}
+            </label>
+          ))
+        )}
+        <div className="modal-actions">
+          <button className="btn-approve" onClick={() => onRespond(request.id, "accept", request.mode === "form" ? values : null)}>允许</button>
+          <button className="btn-reject" onClick={() => onRespond(request.id, "decline", null)}>拒绝</button>
+          <button className="btn-reject" onClick={() => onRespond(request.id, "cancel", null)}>取消</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatDate(seconds: number) {
+  if (!seconds) return "未知时间";
+  return new Date(seconds * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function mentionQuery(text: string): { query: string; start: number; end: number } | null {
+  const match = /(^|\s)@([^\s@]*)$/.exec(text);
+  if (!match) return null;
+  const prefixLength = match[1]?.length ?? 0;
+  const start = match.index + prefixLength;
+  return { query: match[2] ?? "", start, end: text.length };
+}
+
+function schemaFields(schema: JsonValue): Array<{
+  name: string;
+  title: string;
+  description: string;
+  type: string;
+  defaultValue: JsonValue | undefined;
+  options: Array<{ value: string; label: string }>;
+}> {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return [];
+  const schemaRecord = schema as Record<string, JsonValue | undefined>;
+  const properties = schemaRecord.properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) return [];
+  return Object.entries(properties).flatMap(([name, raw]) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const value = raw as Record<string, JsonValue | undefined>;
+    return [{
+      name,
+      title: typeof value.title === "string" ? value.title : "",
+      description: typeof value.description === "string" ? value.description : "",
+      type: typeof value.type === "string" ? value.type : "string",
+      defaultValue: value.default,
+      options: enumOptions(value),
+    }];
+  });
+}
+
+function enumOptions(schema: Record<string, JsonValue | undefined>): Array<{ value: string; label: string }> {
+  if (Array.isArray(schema.enum)) {
+    return schema.enum.filter((v): v is string => typeof v === "string").map(value => ({ value, label: value }));
+  }
+  if (Array.isArray(schema.oneOf)) {
+    return schema.oneOf.flatMap(option => {
+      if (!option || typeof option !== "object" || Array.isArray(option)) return [];
+      const record = option as Record<string, JsonValue | undefined>;
+      return typeof record.const === "string"
+        ? [{ value: record.const, label: typeof record.title === "string" ? record.title : record.const }]
+        : [];
+    });
+  }
+  return [];
 }
 
 // ── EffortPills ───────────────────────────────────────────────────────────────

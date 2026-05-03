@@ -1,9 +1,10 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
-import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, lstatSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { spawn, ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { WebSocketServer, WebSocket } from "ws";
+import type { Duplex } from "node:stream";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
@@ -11,17 +12,22 @@ import { promisify } from "node:util";
 import type {
   ClientMsg, ServerMsg, AppItem, FileChange, FsEntry,
   ApprovalDecision, FileMention, ReasoningEffort, ModelInfo,
+  ConfigKey, ConfigState, FileSearchResult, InputQuestion,
+  JsonValue, McpElicitationAction, McpServerSummary, McpStartupSummary,
+  SerializedHistoryEntry, ThreadSummary,
 } from "./shared.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-const DIST_CLIENT = path.join(__dirname, "dist/client");
+const DIST_CLIENT = path.resolve(__dirname, "dist/client");
 const isProd = process.env.NODE_ENV === "production";
 const execFileAsync = promisify(execFile);
+const CODEX_WEB_AUTH_TOKEN = process.env.CODEX_WEB_AUTH_TOKEN ?? "";
 
 const CODEX_BIN =
   process.env.CODEX_BIN ??
   "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex";
+const REPO_MODEL_CATALOG = path.resolve(__dirname, "../codex-rs/models-manager/models.json");
 
 const MIME: Record<string, string> = {
   ".html": "text/html", ".js": "application/javascript",
@@ -30,12 +36,43 @@ const MIME: Record<string, string> = {
 };
 
 // ── Static file serving ───────────────────────────────────────────────────────
+function isPathInside(parent: string, child: string) {
+  const rel = path.relative(parent, child);
+  return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function resolveStaticPath(reqUrl: string | undefined): string | null {
+  let pathname: string;
+  try {
+    pathname = new URL(reqUrl ?? "/", "http://codex-web.local").pathname;
+  } catch {
+    return null;
+  }
+
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  if (decoded.split(/[\\/]+/).includes("..")) return null;
+
+  const relative = decoded === "/" ? "index.html" : decoded.replace(/^\/+/, "");
+  const normalized = path.normalize(relative);
+  if (normalized.startsWith("..") || path.isAbsolute(normalized)) return null;
+
+  const requested = path.resolve(DIST_CLIENT, normalized);
+  if (!isPathInside(DIST_CLIENT, requested)) return null;
+
+  const fallback = path.resolve(DIST_CLIENT, "index.html");
+  return existsSync(requested) ? requested : fallback;
+}
+
 async function serveStatic(req: IncomingMessage, res: ServerResponse) {
   if (!isProd) { res.writeHead(404); res.end("Dev mode"); return; }
-  const url = req.url === "/" ? "/index.html" : (req.url ?? "/index.html");
-  const ext = path.extname(url);
-  let fp = path.join(DIST_CLIENT, url);
-  if (!existsSync(fp)) fp = path.join(DIST_CLIENT, "index.html");
+  const fp = resolveStaticPath(req.url);
+  if (!fp) { res.writeHead(404); res.end("Not found"); return; }
+  const ext = path.extname(fp);
   readFile(fp).then(data => {
     res.writeHead(200, { "Content-Type": MIME[ext] ?? "text/plain" });
     res.end(data);
@@ -43,15 +80,229 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse) {
 }
 
 // ── Config helpers ────────────────────────────────────────────────────────────
-function readConfig(): { model: string; effort: ReasoningEffort; baseUrl: string } {
+type CodexConfig = {
+  model: string;
+  effort: ReasoningEffort;
+  baseUrl: string;
+  modelCatalogJson: string;
+};
+
+function readConfig(): CodexConfig {
   try {
     const home = process.env.HOME ?? "/root";
     const toml = readFileSync(path.join(home, ".codex/config.toml"), "utf8");
     const model = toml.match(/^model\s*=\s*"([^"]+)"/m)?.[1] ?? "unknown";
     const effort = (toml.match(/^model_reasoning_effort\s*=\s*"([^"]+)"/m)?.[1] ?? "high") as ReasoningEffort;
     const baseUrl = toml.match(/^base_url\s*=\s*"([^"]+)"/m)?.[1] ?? "";
-    return { model, effort, baseUrl };
-  } catch { return { model: "unknown", effort: "high", baseUrl: "" }; }
+    const modelCatalogJson = toml.match(/^model_catalog_json\s*=\s*"([^"]+)"/m)?.[1] ?? "";
+    return { model, effort, baseUrl, modelCatalogJson };
+  } catch { return { model: "unknown", effort: "high", baseUrl: "", modelCatalogJson: "" }; }
+}
+
+function codexArgs(config: CodexConfig): string[] {
+  const args = ["app-server"];
+  const modelCatalogJson =
+    process.env.CODEX_WEB_MODEL_CATALOG_JSON ??
+    (config.baseUrl && !config.modelCatalogJson && existsSync(REPO_MODEL_CATALOG)
+      ? REPO_MODEL_CATALOG
+      : "");
+
+  if (modelCatalogJson && process.env.CODEX_WEB_MODEL_CATALOG_JSON !== "off") {
+    args.push("-c", `model_catalog_json=${JSON.stringify(modelCatalogJson)}`);
+  }
+
+  args.push("--listen", "stdio://");
+  return args;
+}
+
+function getHeaderValue(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? value[0] ?? "" : value ?? "";
+}
+
+function hostNameFromHeader(host: string): string {
+  try {
+    return new URL(`http://${host}`).hostname;
+  } catch {
+    return "";
+  }
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return h === "localhost" || h === "::1" || h === "[::1]" || h.startsWith("127.");
+}
+
+function isOriginAllowed(req: IncomingMessage): boolean {
+  const origin = getHeaderValue(req.headers.origin);
+  if (!origin) return true;
+
+  try {
+    const originUrl = new URL(origin);
+    const requestHost = getHeaderValue(req.headers.host);
+    return originUrl.host === requestHost || isLoopbackHost(originUrl.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function bearerToken(req: IncomingMessage): string {
+  const auth = getHeaderValue(req.headers.authorization);
+  const prefix = "Bearer ";
+  return auth.startsWith(prefix) ? auth.slice(prefix.length) : "";
+}
+
+function websocketToken(req: IncomingMessage): string {
+  try {
+    const url = new URL(req.url ?? "", "http://codex-web.local");
+    return url.searchParams.get("token") ?? bearerToken(req);
+  } catch {
+    return bearerToken(req);
+  }
+}
+
+function validateUpgradeRequest(req: IncomingMessage): string | null {
+  let pathname = "";
+  try {
+    pathname = new URL(req.url ?? "", "http://codex-web.local").pathname;
+  } catch {
+    return "Bad request";
+  }
+  if (pathname !== "/ws") return "Not found";
+
+  const host = hostNameFromHeader(getHeaderValue(req.headers.host));
+  if (!CODEX_WEB_AUTH_TOKEN && !isLoopbackHost(host)) {
+    return "Set CODEX_WEB_AUTH_TOKEN before exposing codex-web off localhost";
+  }
+
+  if (CODEX_WEB_AUTH_TOKEN && websocketToken(req) !== CODEX_WEB_AUTH_TOKEN) {
+    return "Unauthorized";
+  }
+
+  if (!isOriginAllowed(req)) {
+    return "Forbidden origin";
+  }
+
+  return null;
+}
+
+function rejectUpgrade(socket: Duplex, status: number, message: string) {
+  socket.write(
+    `HTTP/1.1 ${status} ${message}\r\n` +
+    "Connection: close\r\n" +
+    "Content-Type: text/plain\r\n" +
+    `Content-Length: ${Buffer.byteLength(message)}\r\n` +
+    "\r\n" +
+    message,
+  );
+  socket.destroy();
+}
+
+function isObj(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return value === "none" || value === "minimal" || value === "low" ||
+    value === "medium" || value === "high" || value === "xhigh";
+}
+
+function isApprovalDecision(value: unknown): value is ApprovalDecision {
+  return value === "accept" || value === "acceptForSession" ||
+    value === "decline" || value === "cancel";
+}
+
+function isMcpElicitationAction(value: unknown): value is McpElicitationAction {
+  return value === "accept" || value === "decline" || value === "cancel";
+}
+
+function isConfigKey(value: unknown): value is ConfigKey {
+  return value === "model" || value === "model_reasoning_effort" ||
+    value === "approval_policy" || value === "sandbox_mode" || value === "web_search";
+}
+
+function validString(value: unknown, max = 100_000): value is string {
+  return typeof value === "string" && value.length <= max;
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null) return true;
+  const t = typeof value;
+  if (t === "string" || t === "number" || t === "boolean") return Number.isFinite(value as number) || t !== "number";
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (isObj(value)) return Object.values(value).every(isJsonValue);
+  return false;
+}
+
+function parseMentions(value: unknown): FileMention[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((m): FileMention[] => {
+    if (!isObj(m) || !validString(m.name, 256) || !validString(m.path, 4096)) return [];
+    return [{ name: m.name, path: m.path }];
+  });
+}
+
+function parseAnswers(value: unknown): Record<string, string[]> | null {
+  if (!isObj(value)) return null;
+  const answers: Record<string, string[]> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (!validString(key, 128) || !Array.isArray(raw)) return null;
+    const values = raw.filter((v): v is string => validString(v, 20_000));
+    if (values.length !== raw.length) return null;
+    answers[key] = values;
+  }
+  return answers;
+}
+
+function parseClientMsg(raw: string): ClientMsg | null {
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return null; }
+  if (!isObj(parsed) || typeof parsed.type !== "string") return null;
+
+  switch (parsed.type) {
+    case "send":
+      return validString(parsed.text) ? { type: "send", text: parsed.text, mentions: parseMentions(parsed.mentions) } : null;
+    case "interrupt":
+    case "new_thread":
+    case "list_threads":
+    case "read_config":
+    case "list_mcp":
+    case "list_models":
+      return { type: parsed.type };
+    case "resume_thread":
+      return validString(parsed.threadId, 128) ? { type: "resume_thread", threadId: parsed.threadId } : null;
+    case "approve":
+      return validString(parsed.id, 128) && isApprovalDecision(parsed.decision)
+        ? { type: "approve", id: parsed.id, decision: parsed.decision }
+        : null;
+    case "respond_input": {
+      const answers = parseAnswers(parsed.answers);
+      return validString(parsed.id, 128) && answers
+        ? { type: "respond_input", id: parsed.id, answers }
+        : null;
+    }
+    case "respond_mcp_elicitation":
+      return validString(parsed.id, 128) && isMcpElicitationAction(parsed.action) && isJsonValue(parsed.content)
+        ? { type: "respond_mcp_elicitation", id: parsed.id, action: parsed.action, content: parsed.content }
+        : null;
+    case "slash":
+      return validString(parsed.name, 64) && /^[a-z][a-z0-9_-]*$/i.test(parsed.name) && validString(parsed.args, 20_000)
+        ? { type: "slash", name: parsed.name, args: parsed.args }
+        : null;
+    case "fs_list":
+      return validString(parsed.path, 4096) ? { type: "fs_list", path: parsed.path } : null;
+    case "fuzzy_file_search":
+      return validString(parsed.query, 512) ? { type: "fuzzy_file_search", query: parsed.query } : null;
+    case "set_model":
+      return validString(parsed.model, 256) ? { type: "set_model", model: parsed.model } : null;
+    case "set_effort":
+      return isReasoningEffort(parsed.effort) ? { type: "set_effort", effort: parsed.effort } : null;
+    case "write_config":
+      return isConfigKey(parsed.key) && validString(parsed.value, 4096)
+        ? { type: "write_config", key: parsed.key, value: parsed.value }
+        : null;
+    default:
+      return null;
+  }
 }
 
 // ── JSON-RPC helpers ──────────────────────────────────────────────────────────
@@ -67,13 +318,23 @@ class CodexSession {
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
   private pendingApprovals = new Map<string | number, (decision: ApprovalDecision) => void>();
+  private pendingInputRequests = new Map<string, (answers: Record<string, string[]>) => void>();
+  private pendingMcpElicitations = new Map<string, (response: { action: McpElicitationAction; content: JsonValue | null }) => void>();
+  private fileChangesByItemId = new Map<string, FileChange[]>();
+  private fileChangeWaiters = new Map<string, Array<(changes: FileChange[]) => void>>();
+  private pendingFileApprovalByItemId = new Map<string, string>();
+  private mcpStartupByName = new Map<string, McpStartupSummary>();
   private threadId = "";
   private currentTurnId = "";
   private closed = false;
   private effort: ReasoningEffort = "high";
+  private config: CodexConfig;
+  private workspaceRoot: string;
 
   constructor(private ws: WebSocket, private cwd: string, private model: string) {
-    this.proc = spawn(CODEX_BIN, ["app-server", "--listen", "stdio://"], {
+    this.config = readConfig();
+    this.workspaceRoot = realpathSync(cwd);
+    this.proc = spawn(CODEX_BIN, codexArgs(this.config), {
       cwd, env: { ...process.env },
       stdio: ["pipe", "pipe", "inherit"],
     });
@@ -91,7 +352,7 @@ class CodexSession {
     });
 
     // read default effort from config
-    const cfg = readConfig();
+    const cfg = this.config;
     this.effort = cfg.effort;
 
     // start thread
@@ -102,6 +363,9 @@ class CodexSession {
 
     this.send({ type: "connected", threadId: this.threadId, cwd: this.cwd, model: this.model });
     this.send({ type: "settings", model: this.model, effort: this.effort });
+    this.background(this.listThreads());
+    this.background(this.readConfigState());
+    this.background(this.listMcpStatus());
   }
 
   async newThread() {
@@ -113,6 +377,25 @@ class CodexSession {
     this.model = resp.model ?? this.model;
     this.send({ type: "connected", threadId: this.threadId, cwd: this.cwd, model: this.model });
     this.send({ type: "settings", model: this.model, effort: this.effort });
+    this.background(this.listThreads());
+  }
+
+  async resumeThread(threadId: string) {
+    this.currentTurnId = "";
+    const resp = await this.rpc("thread/resume", { threadId }) as any;
+    const thread = resp.thread ?? {};
+    this.threadId = thread.id ?? threadId;
+    this.model = resp.model ?? this.model;
+    this.cwd = resp.cwd ?? thread.cwd ?? this.cwd;
+    try {
+      this.workspaceRoot = realpathSync(this.cwd);
+    } catch {
+      this.workspaceRoot = realpathSync(process.cwd());
+    }
+    this.send({ type: "connected", threadId: this.threadId, cwd: this.cwd, model: this.model });
+    this.send({ type: "settings", model: this.model, effort: this.effort });
+    this.send({ type: "thread_history", threadId: this.threadId, entries: this.mapThreadHistory(thread.turns ?? []) });
+    this.background(this.listThreads());
   }
 
   async sendMessage(text: string, mentions: FileMention[] = []) {
@@ -139,47 +422,136 @@ class CodexSession {
   }
 
   async listModels() {
-    // First try the RPC (works when app-server has Codex-format model registry)
+    const modelsById = new Map<string, ModelInfo>();
+
+    // First try the RPC (works when app-server has Codex-format model registry).
     try {
       const resp = await this.rpc("model/list", { limit: 50 }) as any;
       if (Array.isArray(resp?.data) && resp.data.length > 0) {
-        const models: ModelInfo[] = resp.data.map((m: any) => ({
-          id: m.model,
-          displayName: m.displayName ?? m.model,
-          description: m.description ?? "",
-          supportedEfforts: (m.supportedReasoningEfforts ?? []).map((e: any) => e.reasoningEffort),
-          defaultEffort: m.defaultReasoningEffort ?? "high",
-          isDefault: m.isDefault ?? false,
-        }));
-        this.send({ type: "models_list", models });
-        return;
+        for (const m of resp.data) {
+          const id = m.model;
+          if (typeof id !== "string") continue;
+          modelsById.set(id, {
+            id,
+            displayName: m.displayName ?? id,
+            description: m.description ?? "",
+            supportedEfforts: (m.supportedReasoningEfforts ?? []).map((e: any) => e.reasoningEffort),
+            defaultEffort: m.defaultReasoningEffort ?? "high",
+            isDefault: m.isDefault ?? id === this.model,
+          });
+        }
       }
     } catch { /* fall through */ }
 
-    // Fallback: query the provider's /v1/models directly (OpenAI-compatible format)
+    // Also query the provider's /v1/models directly so OpenAI-compatible providers
+    // still appear when app-server is using a static Codex model catalog.
     try {
       const cfg = readConfig();
       const base = cfg.baseUrl || "https://api.openai.com/v1";
       const apiKey = process.env.OPENAI_API_KEY ?? process.env.CLIPROXYAPI_KEY ?? "";
-      const res = await fetch(`${base}/models`, {
-        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-      });
+      const url = new URL("models", base.endsWith("/") ? base : `${base}/`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
       const json = await res.json() as any;
       const data: any[] = json.data ?? [];
-      const models: ModelInfo[] = data
-        .filter((m: any) => typeof m.id === "string")
-        .map((m: any) => ({
+      for (const m of data) {
+        if (typeof m.id !== "string" || modelsById.has(m.id)) continue;
+        modelsById.set(m.id, {
           id: m.id,
           displayName: m.id,
           description: m.owned_by ? `by ${m.owned_by}` : "",
           supportedEfforts: [],
           defaultEffort: "high" as ReasoningEffort,
           isDefault: m.id === this.model,
-        }));
+        });
+      }
+    } catch { /* ignore provider fallback failure */ }
+
+    const models = [...modelsById.values()];
+    if (models.length > 0) {
       this.send({ type: "models_list", models });
-    } catch {
-      this.send({ type: "error", message: "无法获取模型列表" });
+      return;
     }
+    this.send({ type: "error", message: "无法获取模型列表" });
+  }
+
+  async listThreads() {
+    const resp = await this.rpc("thread/list", {
+      limit: 30,
+      sortKey: "updated_at",
+      sortDirection: "desc",
+      cwd: this.cwd,
+    }) as any;
+
+    const threads: ThreadSummary[] = Array.isArray(resp?.data)
+      ? resp.data
+          .map((thread: any) => this.mapThreadSummary(thread))
+          .filter((thread: ThreadSummary | null): thread is ThreadSummary => Boolean(thread))
+      : [];
+    this.send({ type: "threads_list", threads, nextCursor: resp?.nextCursor ?? null });
+  }
+
+  async searchFiles(query: string) {
+    if (!query.trim()) {
+      this.send({ type: "fuzzy_file_search_result", query, files: [] });
+      return;
+    }
+
+    const resp = await this.rpc("fuzzyFileSearch", {
+      query,
+      roots: [this.workspaceRoot],
+      cancellationToken: null,
+    }) as any;
+
+    const files: FileSearchResult[] = Array.isArray(resp?.files)
+      ? resp.files.slice(0, 12).map((f: any) => ({
+          name: String(f.file_name ?? path.basename(f.path ?? "")),
+          path: String(f.path ?? ""),
+          root: String(f.root ?? this.workspaceRoot),
+          score: typeof f.score === "number" ? f.score : 0,
+        }))
+      : [];
+    this.send({ type: "fuzzy_file_search_result", query, files });
+  }
+
+  async readConfigState() {
+    const resp = await this.rpc("config/read", { includeLayers: false, cwd: this.cwd }) as any;
+    this.send({ type: "config_state", config: this.mapConfigState(resp?.config ?? {}) });
+  }
+
+  async writeConfigValue(key: ConfigKey, value: string) {
+    const parsed = this.parseConfigValue(key, value);
+    if (parsed === undefined) {
+      this.send({ type: "error", message: `无效配置值: ${key}` });
+      return;
+    }
+
+    await this.rpc("config/batchWrite", {
+      edits: [{ keyPath: key, value: parsed, mergeStrategy: "replace" }],
+      reloadUserConfig: true,
+    });
+
+    if (key === "model" && typeof parsed === "string") this.model = parsed;
+    if (key === "model_reasoning_effort" && isReasoningEffort(parsed)) this.effort = parsed;
+    this.send({ type: "settings", model: this.model, effort: this.effort });
+    await this.readConfigState();
+  }
+
+  async listMcpStatus() {
+    const resp = await this.rpc("mcpServerStatus/list", { limit: 50, detail: "full" }) as any;
+    const servers: McpServerSummary[] = Array.isArray(resp?.data)
+      ? resp.data.map((s: any) => this.mapMcpStatus(s))
+      : [];
+    this.send({ type: "mcp_statuses", servers });
   }
 
   async interrupt() {
@@ -194,6 +566,26 @@ class CodexSession {
       this.pendingApprovals.delete(id);
       resolve(decision);
     }
+  }
+
+  respondInput(id: string, answers: Record<string, string[]>) {
+    const resolve = this.pendingInputRequests.get(id);
+    if (resolve) {
+      this.pendingInputRequests.delete(id);
+      resolve(answers);
+    }
+  }
+
+  respondMcpElicitation(id: string, action: McpElicitationAction, content: JsonValue | null) {
+    const resolve = this.pendingMcpElicitations.get(id);
+    if (resolve) {
+      this.pendingMcpElicitations.delete(id);
+      resolve({ action, content });
+    }
+  }
+
+  notifyError(message: string) {
+    this.send({ type: "error", message });
   }
 
   async handleSlash(name: string, args: string) {
@@ -226,12 +618,18 @@ class CodexSession {
 
   listFiles(dirPath: string) {
     try {
-      const entries: FsEntry[] = readdirSync(dirPath).map(name => {
-        const fp = path.join(dirPath, name);
-        const isDir = statSync(fp).isDirectory();
+      const dir = this.resolveWorkspacePath(dirPath);
+      if (!dir) {
+        this.send({ type: "fs_list_result", path: dirPath, entries: [] });
+        return;
+      }
+
+      const entries: FsEntry[] = readdirSync(dir).map(name => {
+        const fp = path.join(dir, name);
+        const isDir = lstatSync(fp).isDirectory();
         return { name, path: fp, isDir };
       }).filter(e => !e.name.startsWith(".") || e.isDir);
-      this.send({ type: "fs_list_result", path: dirPath, entries });
+      this.send({ type: "fs_list_result", path: dir, entries });
     } catch { this.send({ type: "fs_list_result", path: dirPath, entries: [] }); }
   }
 
@@ -263,6 +661,176 @@ class CodexSession {
     if (this.ws.readyState === 1 /* OPEN */) {
       this.ws.send(JSON.stringify(msg));
     }
+  }
+
+  private background(promise: Promise<unknown>) {
+    promise.catch(err => this.send({ type: "error", message: err instanceof Error ? err.message : String(err) }));
+  }
+
+  private resolveWorkspacePath(input: string): string | null {
+    const absolute = path.resolve(this.workspaceRoot, input);
+    if (!isPathInside(this.workspaceRoot, absolute)) return null;
+    let real: string;
+    try {
+      real = realpathSync(absolute);
+    } catch {
+      return null;
+    }
+    return isPathInside(this.workspaceRoot, real) ? real : null;
+  }
+
+  private mapThreadSummary(thread: any): ThreadSummary | null {
+    if (!thread || typeof thread.id !== "string") return null;
+    return {
+      id: thread.id,
+      preview: typeof thread.preview === "string" ? thread.preview : "",
+      name: typeof thread.name === "string" ? thread.name : null,
+      cwd: typeof thread.cwd === "string" ? thread.cwd : "",
+      modelProvider: typeof thread.modelProvider === "string" ? thread.modelProvider : "",
+      status: typeof thread.status?.type === "string" ? thread.status.type : "unknown",
+      createdAt: typeof thread.createdAt === "number" ? thread.createdAt : 0,
+      updatedAt: typeof thread.updatedAt === "number" ? thread.updatedAt : 0,
+      agentNickname: typeof thread.agentNickname === "string" ? thread.agentNickname : null,
+      agentRole: typeof thread.agentRole === "string" ? thread.agentRole : null,
+    };
+  }
+
+  private mapThreadHistory(turns: any[]): SerializedHistoryEntry[] {
+    const entries: SerializedHistoryEntry[] = [];
+    for (const turn of turns) {
+      const rawItems = Array.isArray(turn?.items) ? turn.items : [];
+      for (const item of rawItems) {
+        if (item?.type === "userMessage") {
+          const user = this.mapUserMessage(item);
+          if (user.text || user.mentions.length > 0) {
+            entries.push({ id: item.id ?? `user-${entries.length}`, kind: "user", ...user });
+          }
+        }
+      }
+
+      const items: AppItem[] = rawItems
+        .filter((item: any) => item?.type !== "userMessage" && item?.type !== "hookPrompt")
+        .map((item: any) => this.mapItem(item))
+        .filter((item: AppItem | null): item is AppItem => Boolean(item));
+
+      if (items.length > 0) {
+        entries.push({
+          id: turn?.id ?? `turn-${entries.length}`,
+          kind: "turn",
+          items,
+          itemOrder: items.map(item => item.id),
+          usage: null,
+          status: this.mapTurnStatus(turn?.status),
+          failMessage: typeof turn?.error?.message === "string" ? turn.error.message : undefined,
+        });
+      }
+    }
+    return entries;
+  }
+
+  private mapUserMessage(item: any): { text: string; mentions: FileMention[] } {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    const text: string[] = [];
+    const mentions: FileMention[] = [];
+    for (const part of content) {
+      if (part?.type === "text" && typeof part.text === "string") text.push(part.text);
+      if (part?.type === "mention" && typeof part.name === "string" && typeof part.path === "string") {
+        mentions.push({ name: part.name, path: part.path });
+        text.push(`@${part.name}`);
+      }
+    }
+    return { text: text.join("\n").trim(), mentions };
+  }
+
+  private mapTurnStatus(status: unknown): "running" | "done" | "failed" | "interrupted" {
+    if (status === "completed") return "done";
+    if (status === "failed") return "failed";
+    if (status === "interrupted") return "interrupted";
+    return "running";
+  }
+
+  private mapPatchStatus(status: unknown): "pending" | "running" | "completed" | "failed" | "declined" {
+    if (status === "completed") return "completed";
+    if (status === "failed") return "failed";
+    if (status === "declined") return "declined";
+    if (status === "inProgress") return "running";
+    return "pending";
+  }
+
+  private mapConfigState(config: any): ConfigState {
+    const approval = config.approval_policy;
+    const sandbox = config.sandbox_mode;
+    const webSearch = config.web_search;
+    const effortValue = config.model_reasoning_effort;
+    return {
+      model: typeof config.model === "string" ? config.model : this.model,
+      modelReasoningEffort: isReasoningEffort(effortValue) ? effortValue : this.effort,
+      approvalPolicy: approval === "untrusted" || approval === "on-failure" || approval === "on-request" || approval === "never"
+        ? approval
+        : "granular",
+      sandboxMode: sandbox === "read-only" || sandbox === "workspace-write" || sandbox === "danger-full-access"
+        ? sandbox
+        : "workspace-write",
+      webSearch: webSearch === "disabled" || webSearch === "cached" || webSearch === "live"
+        ? webSearch
+        : "disabled",
+    };
+  }
+
+  private parseConfigValue(key: ConfigKey, value: string): JsonValue | undefined {
+    const v = value.trim();
+    if (key === "model") return v ? v : undefined;
+    if (key === "model_reasoning_effort") return isReasoningEffort(v) ? v : undefined;
+    if (key === "approval_policy") {
+      return v === "untrusted" || v === "on-failure" || v === "on-request" || v === "never" ? v : undefined;
+    }
+    if (key === "sandbox_mode") {
+      return v === "read-only" || v === "workspace-write" || v === "danger-full-access" ? v : undefined;
+    }
+    if (key === "web_search") {
+      return v === "disabled" || v === "cached" || v === "live" ? v : undefined;
+    }
+    return undefined;
+  }
+
+  private mapMcpStatus(server: any): McpServerSummary {
+    const startup = this.mcpStartupByName.get(String(server?.name ?? ""));
+    return {
+      name: String(server?.name ?? ""),
+      authStatus: String(server?.authStatus ?? "unknown"),
+      tools: Object.keys(server?.tools ?? {}),
+      resourceCount: Array.isArray(server?.resources) ? server.resources.length : 0,
+      resourceTemplateCount: Array.isArray(server?.resourceTemplates) ? server.resourceTemplates.length : 0,
+      startupStatus: startup?.startupStatus,
+      error: startup?.error ?? null,
+    };
+  }
+
+  private rememberFileChanges(itemId: string, changes: FileChange[]) {
+    this.fileChangesByItemId.set(itemId, changes);
+    const approvalId = this.pendingFileApprovalByItemId.get(itemId);
+    if (approvalId) this.send({ type: "approval_file_updated", id: approvalId, changes });
+
+    const waiters = this.fileChangeWaiters.get(itemId);
+    if (!waiters) return;
+    this.fileChangeWaiters.delete(itemId);
+    for (const resolve of waiters) resolve(changes);
+  }
+
+  private waitForFileChanges(itemId: string, timeoutMs = 500): Promise<FileChange[]> {
+    const existing = this.fileChangesByItemId.get(itemId);
+    if (existing && existing.length > 0) return Promise.resolve(existing);
+
+    return new Promise(resolve => {
+      const waiters = this.fileChangeWaiters.get(itemId) ?? [];
+      waiters.push(resolve);
+      this.fileChangeWaiters.set(itemId, waiters);
+      setTimeout(() => {
+        const pending = this.fileChangeWaiters.get(itemId) ?? [];
+        this.fileChangeWaiters.set(itemId, pending.filter(fn => fn !== resolve));
+        resolve(this.fileChangesByItemId.get(itemId) ?? []);
+      }, timeoutMs);
+    });
   }
 
   // ── Incoming from app-server ───────────────────────────────────────────────
@@ -304,8 +872,7 @@ class CodexSession {
         break;
 
       case "turn/completed": {
-        const usage = p.turn ? null : null; // usage comes via thread/tokenUsage/updated
-        this.send({ type: "turn_completed", turnId: p.turn?.id ?? this.currentTurnId, usage });
+        this.send({ type: "turn_completed", turnId: p.turn?.id ?? this.currentTurnId, usage: null });
         this.currentTurnId = "";
         break;
       }
@@ -313,9 +880,8 @@ class CodexSession {
       case "thread/tokenUsage/updated": {
         const last = p.tokenUsage?.last;
         if (last && this.currentTurnId) {
-          // update usage on the current turn
           this.send({
-            type: "turn_completed",
+            type: "token_usage",
             turnId: this.currentTurnId,
             usage: {
               inputTokens: last.inputTokens,
@@ -354,13 +920,46 @@ class CodexSession {
 
       case "item/fileChange/patchUpdated":
         if (p.changes) {
+          const changes = (p.changes as any[]).map(c => ({ path: c.path, kind: c.kind, diff: c.diff ?? "" }));
+          this.rememberFileChanges(p.itemId, changes);
           const item: AppItem = {
             id: p.itemId, type: "fileChange",
-            changes: (p.changes as any[]).map(c => ({ path: c.path, kind: c.kind, diff: c.diff ?? "" })),
-            status: "completed",
+            changes,
+            status: "running",
           };
           this.send({ type: "item_updated", turnId: p.turnId, item });
         }
+        break;
+
+      case "item/mcpToolCall/progress": {
+        this.send({
+          type: "item_updated",
+          turnId: p.turnId,
+          item: {
+            id: p.itemId,
+            type: "mcpToolCall",
+            server: "",
+            tool: "",
+            status: "in_progress",
+            progress: [p.message ?? ""],
+          },
+        });
+        break;
+      }
+
+      case "mcpServer/startupStatus/updated": {
+        const server: McpStartupSummary = {
+          name: p.name ?? "",
+          startupStatus: p.status ?? "unknown",
+          error: p.error ?? null,
+        };
+        this.mcpStartupByName.set(server.name, server);
+        this.send({ type: "mcp_status_update", server });
+        break;
+      }
+
+      case "serverRequest/resolved":
+        this.send({ type: "input_resolved", id: String(p.requestId ?? "") });
         break;
 
       // ignore noisy or unneeded notifications
@@ -371,7 +970,6 @@ class CodexSession {
       case "hook/completed":
       case "item/autoApprovalReview/started":
       case "item/autoApprovalReview/completed":
-      case "serverRequest/resolved":
         break;
 
       default:
@@ -399,15 +997,64 @@ class CodexSession {
 
       case "item/fileChange/requestApproval": {
         const approvalId = String(msg.id);
-        // changes come via item notifications; send what we have
+        const itemId = String(p.itemId ?? "");
+        const changes = itemId ? await this.waitForFileChanges(itemId) : [];
+        if (itemId) this.pendingFileApprovalByItemId.set(itemId, approvalId);
         this.send({
           type: "approval_file",
           id: approvalId,
           reason: p.reason ?? undefined,
-          changes: [],
+          grantRoot: p.grantRoot ?? undefined,
+          changes,
         });
         const decision = await this.waitForApproval(approvalId);
+        if (itemId) this.pendingFileApprovalByItemId.delete(itemId);
         this.rpcRespond(msg.id, { decision });
+        break;
+      }
+
+      case "item/tool/requestUserInput": {
+        const requestId = String(msg.id);
+        this.send({
+          type: "input_request",
+          request: {
+            id: requestId,
+            title: "需要你的输入",
+            questions: this.mapInputQuestions(p.questions),
+          },
+        });
+        const answers = await this.waitForInput(requestId);
+        this.rpcRespond(msg.id, {
+          answers: Object.fromEntries(
+            Object.entries(answers).map(([key, values]) => [key, { answers: values }]),
+          ),
+        });
+        break;
+      }
+
+      case "mcpServer/elicitation/request": {
+        const requestId = String(msg.id);
+        const request = p.mode === "url"
+          ? {
+              id: requestId,
+              serverName: p.serverName ?? "",
+              turnId: p.turnId ?? null,
+              mode: "url" as const,
+              message: p.message ?? "",
+              url: p.url ?? "",
+              elicitationId: p.elicitationId ?? "",
+            }
+          : {
+              id: requestId,
+              serverName: p.serverName ?? "",
+              turnId: p.turnId ?? null,
+              mode: "form" as const,
+              message: p.message ?? "",
+              requestedSchema: isJsonValue(p.requestedSchema) ? p.requestedSchema : null,
+            };
+        this.send({ type: "mcp_elicitation", request });
+        const response = await this.waitForMcpElicitation(requestId);
+        this.rpcRespond(msg.id, { ...response, _meta: null });
         break;
       }
 
@@ -420,6 +1067,33 @@ class CodexSession {
 
   private waitForApproval(id: string): Promise<ApprovalDecision> {
     return new Promise(resolve => this.pendingApprovals.set(id, resolve));
+  }
+
+  private waitForInput(id: string): Promise<Record<string, string[]>> {
+    return new Promise(resolve => this.pendingInputRequests.set(id, resolve));
+  }
+
+  private waitForMcpElicitation(id: string): Promise<{ action: McpElicitationAction; content: JsonValue | null }> {
+    return new Promise(resolve => this.pendingMcpElicitations.set(id, resolve));
+  }
+
+  private mapInputQuestions(raw: any): InputQuestion[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.flatMap((q): InputQuestion[] => {
+      if (!q || typeof q.id !== "string") return [];
+      return [{
+        id: q.id,
+        header: typeof q.header === "string" ? q.header : "",
+        question: typeof q.question === "string" ? q.question : "",
+        isOther: Boolean(q.isOther),
+        isSecret: Boolean(q.isSecret),
+        options: Array.isArray(q.options)
+          ? q.options
+              .filter((o: any) => typeof o?.label === "string")
+              .map((o: any) => ({ label: o.label, description: typeof o.description === "string" ? o.description : "" }))
+          : null,
+      }];
+    });
   }
 
   private mapItem(raw: any): AppItem | null {
@@ -435,19 +1109,23 @@ class CodexSession {
           aggregatedOutput: raw.aggregatedOutput ?? "",
           exitCode: raw.exitCode ?? null,
           durationMs: raw.durationMs ?? null,
-          status: raw.status === "completed" ? "completed" : raw.status === "failed" ? "failed" : raw.status === "running" ? "running" : "pending",
+          status: raw.status === "completed" ? "completed" : raw.status === "failed" ? "failed" : raw.status === "inProgress" || raw.status === "running" ? "running" : "pending",
         };
       case "fileChange":
-        return {
+        {
+          const changes = (raw.changes ?? []).map((c: any) => ({ path: c.path, kind: c.kind, diff: c.diff ?? "" }));
+          if (typeof raw.id === "string") this.rememberFileChanges(raw.id, changes);
+          return {
           id: raw.id, type: "fileChange",
-          changes: (raw.changes ?? []).map((c: any) => ({ path: c.path, kind: c.kind, diff: c.diff ?? "" })),
-          status: raw.status === "failed" ? "failed" : "completed",
-        };
+          changes,
+          status: this.mapPatchStatus(raw.status),
+          };
+        }
       case "mcpToolCall":
         return {
           id: raw.id, type: "mcpToolCall",
           server: raw.server ?? "", tool: raw.tool ?? "",
-          status: raw.status ?? "in_progress",
+          status: raw.status === "completed" ? "completed" : raw.status === "failed" ? "failed" : "in_progress",
           error: raw.error?.message,
         };
       case "webSearch":
@@ -464,7 +1142,19 @@ class CodexSession {
 
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────
 const httpServer = createServer(serveStatic);
-const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+const wss = new WebSocketServer({ noServer: true });
+
+httpServer.on("upgrade", (req, socket, head) => {
+  const rejection = validateUpgradeRequest(req);
+  if (rejection) {
+    rejectUpgrade(socket, rejection === "Unauthorized" ? 401 : rejection === "Not found" ? 404 : 403, rejection);
+    return;
+  }
+
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit("connection", ws, req);
+  });
+});
 
 wss.on("connection", async (ws) => {
   const cwd = process.cwd();
@@ -480,37 +1170,68 @@ wss.on("connection", async (ws) => {
   }
 
   ws.on("message", async (raw) => {
-    let msg: ClientMsg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    const msg = parseClientMsg(raw.toString());
+    if (!msg) {
+      session.notifyError("无效客户端消息");
+      return;
+    }
 
-    switch (msg.type) {
-      case "send":
-        await session.sendMessage(msg.text, msg.mentions);
-        break;
-      case "interrupt":
-        await session.interrupt();
-        break;
-      case "new_thread":
-        await session.newThread();
-        break;
-      case "approve":
-        session.respondApproval(msg.id, msg.decision);
-        break;
-      case "slash":
-        await session.handleSlash(msg.name, msg.args);
-        break;
-      case "fs_list":
-        session.listFiles(msg.path);
-        break;
-      case "set_model":
-        session.setModel(msg.model);
-        break;
-      case "set_effort":
-        session.setEffort(msg.effort);
-        break;
-      case "list_models":
-        await session.listModels();
-        break;
+    try {
+      switch (msg.type) {
+        case "send":
+          await session.sendMessage(msg.text, msg.mentions);
+          break;
+        case "interrupt":
+          await session.interrupt();
+          break;
+        case "new_thread":
+          await session.newThread();
+          break;
+        case "list_threads":
+          await session.listThreads();
+          break;
+        case "resume_thread":
+          await session.resumeThread(msg.threadId);
+          break;
+        case "approve":
+          session.respondApproval(msg.id, msg.decision);
+          break;
+        case "respond_input":
+          session.respondInput(msg.id, msg.answers);
+          break;
+        case "respond_mcp_elicitation":
+          session.respondMcpElicitation(msg.id, msg.action, msg.content);
+          break;
+        case "slash":
+          await session.handleSlash(msg.name, msg.args);
+          break;
+        case "fs_list":
+          session.listFiles(msg.path);
+          break;
+        case "fuzzy_file_search":
+          await session.searchFiles(msg.query);
+          break;
+        case "set_model":
+          session.setModel(msg.model);
+          break;
+        case "set_effort":
+          session.setEffort(msg.effort);
+          break;
+        case "list_models":
+          await session.listModels();
+          break;
+        case "read_config":
+          await session.readConfigState();
+          break;
+        case "write_config":
+          await session.writeConfigValue(msg.key, msg.value);
+          break;
+        case "list_mcp":
+          await session.listMcpStatus();
+          break;
+      }
+    } catch (err) {
+      session.notifyError(err instanceof Error ? err.message : String(err));
     }
   });
 
