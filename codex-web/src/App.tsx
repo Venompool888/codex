@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, KeyboardEvent, useCallback } from "react";
-import { useCodexWs, ChatEntry, TurnEntry } from "./useCodexWs";
+import { useCodexWs, ConnectionStatus, TurnEntry } from "./useCodexWs";
 import { ApprovalModal } from "./ApprovalModal";
 import { SlashMenu } from "./SlashMenu";
 import type {
@@ -15,7 +15,7 @@ marked.setOptions({ async: false, breaks: true, gfm: true });
 
 export default function App() {
   const {
-    connected, thinking, threadId, model, effort, models, cwd, entries, approval,
+    connected, connectionStatus, connectionError, thinking, threadId, model, effort, models, cwd, entries, approval,
     threads, fileSearchResults, config, mcpServers, inputRequest, mcpElicitation,
     send, interrupt, newThread, listThreads, resumeThread, respond, respondInput, respondMcpElicitation,
     slash, searchFiles,
@@ -27,7 +27,7 @@ export default function App() {
   const [mentions, setMentions] = useState<FileMention[]>([]);
   const [showSlash, setShowSlash] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
-  const [showThreads, setShowThreads] = useState(true);
+  const [showThreads, setShowThreads] = useState(() => !isCompactViewport());
   const [showConfig, setShowConfig] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -36,6 +36,16 @@ export default function App() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [entries, thinking]);
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 760px)");
+    const applyViewport = (event: MediaQueryList | MediaQueryListEvent) => {
+      setShowThreads(!event.matches);
+    };
+    applyViewport(query);
+    query.addEventListener("change", applyViewport);
+    return () => query.removeEventListener("change", applyViewport);
+  }, []);
 
   const activeMention = mentionQuery(input);
   useEffect(() => {
@@ -124,27 +134,32 @@ export default function App() {
   }
 
   const shortCwd = cwd.replace(/^\/root(?=\/|$)/, "~");
+  const statusLabel = connectionStatus === "connected" ? "已连接"
+    : connectionStatus === "failed" ? "初始化失败" : "连接中";
 
   return (
     <div className="app">
       <header>
         <span className="brand">Codex</span>
-        <span className={`dot ${connected ? "on" : "off"}`} title={connected ? "已连接" : "断开"} />
-        <button className="hbtn-model" onClick={openModelPicker} title="切换模型" disabled={!connected}>
-          {model || "…"}
-        </button>
-        <span className="hsep">·</span>
-        <EffortPills effort={effort} onChange={changeEffort} disabled={!connected} />
-        <span className="hsep">·</span>
-        <span className="hinfo cwd" title={cwd}>{shortCwd}</span>
-        {threadId && <><span className="hsep">·</span><span className="hinfo mono">#{threadId.slice(0, 8)}</span></>}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          <button className="btn-icon" onClick={() => { listThreads(); setShowThreads(v => !v); }} title="线程历史" disabled={!connected}>☰</button>
-          <button className="btn-icon" onClick={openConfig} title="配置" disabled={!connected}>⚙</button>
-          <button className="btn-icon" onClick={openMcp} title="MCP 状态" disabled={!connected}>◈</button>
-          <button className="btn-icon" onClick={newThread} title="/new" disabled={!connected}>＋</button>
-          <button className="btn-icon" onClick={() => slash("diff")} title="/diff" disabled={!connected}>±</button>
-          <button className="btn-icon" onClick={() => slash("status")} title="/status" disabled={!connected}>ⓘ</button>
+        <span className={`dot ${connectionStatus}`} title={statusLabel} />
+        <span className={`status-label s-${connectionStatus}`}>{statusLabel}</span>
+        <div className="header-meta">
+          <button className="hbtn-model" onClick={openModelPicker} title="切换模型" disabled={!connected}>
+            {model || "…"}
+          </button>
+          <span className="hsep">·</span>
+          <EffortPills effort={effort} onChange={changeEffort} disabled={!connected} />
+          <span className="hsep">·</span>
+          <span className="hinfo cwd" title={cwd}>{shortCwd}</span>
+          {threadId && <><span className="hsep">·</span><span className="hinfo mono">#{threadId.slice(0, 8)}</span></>}
+        </div>
+        <div className="header-actions">
+          <button className="btn-icon" onClick={() => { listThreads(); setShowThreads(v => !v); }} title="线程历史" aria-label="线程历史" disabled={!connected}>☰</button>
+          <button className="btn-icon" onClick={openConfig} title="配置" aria-label="配置" disabled={!connected}>⚙</button>
+          <button className="btn-icon" onClick={openMcp} title="MCP 状态" aria-label="MCP 状态" disabled={!connected}>◈</button>
+          <button className="btn-icon" onClick={newThread} title="/new" aria-label="新线程" disabled={!connected}>＋</button>
+          <button className="btn-icon" onClick={() => slash("diff")} title="/diff" aria-label="Diff" disabled={!connected}>±</button>
+          <button className="btn-icon" onClick={() => slash("status")} title="/status" aria-label="状态" disabled={!connected}>ⓘ</button>
         </div>
       </header>
 
@@ -163,20 +178,18 @@ export default function App() {
           <div className="messages">
             {entries.length === 0 && (
               <div className="empty">
-                <p>Codex Web</p>
-                <p className="empty-hint">输入消息开始，<code>/</code> 触发命令补全，<code>@</code> 引用文件</p>
-                <div className="empty-suggestions">
-                  {["解释当前目录结构", "查看 git 状态", "有哪些 TODO"].map(s => (
-                    <button
-                      key={s}
-                      className="suggestion-chip"
-                      onClick={() => { send(s); }}
+                {connectionStatus === "failed"
+                  ? <ConnectionErrorPanel message={connectionError} />
+                  : (
+                    <WorkspaceEmpty
+                      status={connectionStatus}
+                      model={model || "pending"}
+                      cwd={shortCwd || "loading"}
                       disabled={!connected || thinking}
-                    >
-                      {s}
-                    </button>
-                  ))}
-                </div>
+                      onSend={send}
+                    />
+                  )
+                }
               </div>
             )}
             {entries.map(e =>
@@ -361,7 +374,7 @@ function ItemView({ item }: { item: AppItem }) {
       return (
         <div className={`item file-change s-${item.status}`}>
           <div className="iheader">
-            <span className="iicon">📄</span>
+            <span className="iicon">F</span>
             <span>文件修改</span>
             <span className="ibadge">{fileBadge(item.status)}</span>
           </div>
@@ -384,7 +397,7 @@ function ItemView({ item }: { item: AppItem }) {
       return (
         <div className={`item mcp s-${item.status}`}>
           <div className="iheader">
-            <span className="iicon">🔧</span>
+            <span className="iicon">M</span>
             <code>{item.server} · {item.tool}</code>
             <span className="ibadge">{item.status === "in_progress" ? "…" : item.status === "completed" ? "✓" : "✗"}</span>
           </div>
@@ -400,7 +413,7 @@ function ItemView({ item }: { item: AppItem }) {
     case "webSearch":
       return (
         <div className="item web-search">
-          <div className="iheader"><span className="iicon">🔍</span><span>搜索</span></div>
+          <div className="iheader"><span className="iicon">S</span><span>搜索</span></div>
           <code>{item.query}</code>
         </div>
       );
@@ -408,7 +421,7 @@ function ItemView({ item }: { item: AppItem }) {
     case "todo":
       return (
         <div className="item todo">
-          <div className="iheader"><span className="iicon">📋</span><span>计划</span></div>
+          <div className="iheader"><span className="iicon">T</span><span>计划</span></div>
           <ul>{item.items.map((t, i) => (
             <li key={i} className={t.completed ? "done" : ""}>
               <span>{t.completed ? "✓" : "○"}</span> {t.text}
@@ -441,6 +454,61 @@ function ThinkingDots() {
   return (
     <div className="entry turn-entry thinking">
       <div className="dots"><span /><span /><span /></div>
+    </div>
+  );
+}
+
+function WorkspaceEmpty({ status, model, cwd, disabled, onSend }: {
+  status: ConnectionStatus;
+  model: string;
+  cwd: string;
+  disabled: boolean;
+  onSend: (text: string) => void;
+}) {
+  const actions = [
+    { label: "解释目录", prompt: "解释当前目录结构" },
+    { label: "git 状态", prompt: "查看 git 状态" },
+    { label: "查 TODO", prompt: "有哪些 TODO" },
+  ];
+  return (
+    <>
+      <div className="empty-main">
+        <div className="empty-kicker">{status === "connecting" ? "Preparing session" : "Workspace ready"}</div>
+        <p>Codex Web</p>
+        <p className="empty-hint">{status === "connecting" ? "正在初始化 app-server" : "在当前工作区开始一次任务"}</p>
+        <div className="empty-suggestions">
+          {actions.map(action => (
+            <button
+              key={action.label}
+              className="suggestion-chip"
+              onClick={() => onSend(action.prompt)}
+              disabled={disabled}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="empty-context" aria-label="当前上下文">
+        <div>
+          <span>model</span>
+          <strong>{model}</strong>
+        </div>
+        <div>
+          <span>cwd</span>
+          <strong>{cwd}</strong>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ConnectionErrorPanel({ message }: { message: string }) {
+  return (
+    <div className="connection-error" role="alert">
+      <p>app-server 初始化失败</p>
+      <pre>{message || "连接关闭，未收到初始化结果。"}</pre>
+      <button className="mini-btn" onClick={() => window.location.reload()}>重试</button>
     </div>
   );
 }
@@ -715,6 +783,10 @@ function McpElicitationModal({ request, onRespond }: {
 function formatDate(seconds: number) {
   if (!seconds) return "未知时间";
   return new Date(seconds * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function isCompactViewport() {
+  return typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches;
 }
 
 function mentionQuery(text: string): { query: string; start: number; end: number } | null {

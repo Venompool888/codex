@@ -30,6 +30,7 @@ export type ApprovalDecision =
 // ── Server → Browser ─────────────────────────────────────────────────────────
 export type ServerMsg =
   | { type: "connected"; threadId: string; cwd: string; model: string }
+  | { type: "startup_failed"; message: string; detail?: string }
   | { type: "threads_list"; threads: ThreadSummary[]; nextCursor: string | null }
   | { type: "thread_history"; threadId: string; entries: SerializedHistoryEntry[] }
   | { type: "turn_started"; turnId: string }

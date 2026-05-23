@@ -2,7 +2,7 @@ import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, existsSync, readdirSync, lstatSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { spawn, ChildProcess } from "node:child_process";
-import { createInterface } from "node:readline";
+import { createInterface, Interface } from "node:readline";
 import { WebSocketServer, WebSocket } from "ws";
 import type { Duplex } from "node:stream";
 import path from "node:path";
@@ -316,7 +316,7 @@ type RpcMsg =
 class CodexSession {
   private proc: ChildProcess;
   private nextId = 1;
-  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
+  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void; timer: NodeJS.Timeout }>();
   private pendingApprovals = new Map<string | number, (decision: ApprovalDecision) => void>();
   private pendingInputRequests = new Map<string, (answers: Record<string, string[]>) => void>();
   private pendingMcpElicitations = new Map<string, (response: { action: McpElicitationAction; content: JsonValue | null }) => void>();
@@ -330,18 +330,33 @@ class CodexSession {
   private effort: ReasoningEffort = "high";
   private config: CodexConfig;
   private workspaceRoot: string;
+  private stderrLines: string[] = [];
+  private stdoutLines: Interface;
+  private stderrReader: Interface | null = null;
 
   constructor(private ws: WebSocket, private cwd: string, private model: string) {
     this.config = readConfig();
     this.workspaceRoot = realpathSync(cwd);
     this.proc = spawn(CODEX_BIN, codexArgs(this.config), {
       cwd, env: { ...process.env },
-      stdio: ["pipe", "pipe", "inherit"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
-    const rl = createInterface({ input: this.proc.stdout! });
-    rl.on("line", (line) => this.handleLine(line));
-    this.proc.on("exit", () => { if (!this.closed) this.send({ type: "error", message: "app-server 进程退出" }); });
+    this.stdoutLines = createInterface({ input: this.proc.stdout! });
+    this.stdoutLines.on("line", (line) => this.handleLine(line));
+    if (this.proc.stderr) {
+      this.stderrReader = createInterface({ input: this.proc.stderr });
+      this.stderrReader.on("line", (line) => {
+        if (!line.trim()) return;
+        this.stderrLines.push(line);
+        if (this.stderrLines.length > 8) this.stderrLines.shift();
+        console.error(line);
+      });
+    }
+    this.proc.on("exit", () => {
+      this.rejectPending(new Error("app-server 进程退出"));
+      if (!this.closed) this.send({ type: "error", message: "app-server 进程退出" });
+    });
   }
 
   async start() {
@@ -635,14 +650,30 @@ class CodexSession {
 
   close() {
     this.closed = true;
+    this.rejectPending(new Error("app-server 连接关闭"));
+    this.stdoutLines.close();
+    this.stderrReader?.close();
     this.proc.kill();
   }
 
+  startupFailureMessage(err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    const detail = this.stderrLines.join("\n");
+    return {
+      message: detail ? `${message}\n\n最近 app-server 日志:\n${detail}` : message,
+      detail,
+    };
+  }
+
   // ── RPC ────────────────────────────────────────────────────────────────────
-  private rpc(method: string, params?: unknown): Promise<unknown> {
+  private rpc(method: string, params?: unknown, timeoutMs = 30_000): Promise<unknown> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${method} timed out after ${Math.round(timeoutMs / 1000)}s`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
       this.write({ jsonrpc: "2.0", id, method, params });
     });
   }
@@ -660,6 +691,14 @@ class CodexSession {
   private send(msg: ServerMsg) {
     if (this.ws.readyState === 1 /* OPEN */) {
       this.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  private rejectPending(err: Error) {
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer);
+      pending.reject(err);
+      this.pending.delete(id);
     }
   }
 
@@ -842,12 +881,12 @@ class CodexSession {
     // Response to our request
     if ("result" in msg && "id" in msg) {
       const p = this.pending.get(msg.id);
-      if (p) { this.pending.delete(msg.id); p.resolve(msg.result); }
+      if (p) { clearTimeout(p.timer); this.pending.delete(msg.id); p.resolve(msg.result); }
       return;
     }
     if ("error" in msg && "id" in msg) {
       const p = this.pending.get(msg.id);
-      if (p) { this.pending.delete(msg.id); p.reject(new Error(msg.error?.message)); }
+      if (p) { clearTimeout(p.timer); this.pending.delete(msg.id); p.reject(new Error(msg.error?.message)); }
       return;
     }
 
@@ -1164,7 +1203,7 @@ wss.on("connection", async (ws) => {
   try {
     await session.start();
   } catch (err) {
-    ws.send(JSON.stringify({ type: "error", message: String(err) } as ServerMsg));
+    ws.send(JSON.stringify({ type: "startup_failed", ...session.startupFailureMessage(err) } as ServerMsg));
     session.close();
     return;
   }

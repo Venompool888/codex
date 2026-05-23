@@ -10,11 +10,43 @@ test("keeps controls disabled until app-server finishes initializing", async ({ 
   await page.goto(authedPath("/"));
 
   await expect(page.getByTitle("/status")).toBeDisabled();
-  await expect(page.locator(".dot.on")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".dot.connected")).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTitle("/status")).toBeEnabled();
 
   await page.getByTitle("/status").click();
   await expect(page.getByText(/thread:/)).toBeVisible();
+});
+
+test("shows startup failure details instead of an inert empty state", async ({ page }) => {
+  await page.addInitScript(() => {
+    class FakeWebSocket {
+      static OPEN = 1;
+      readyState = 1;
+
+      constructor() {
+        setTimeout(() => {
+          this.onopen?.({});
+          this.onmessage?.({
+            data: JSON.stringify({
+              type: "startup_failed",
+              message: "initialize timed out after 30s\n\n最近 app-server 日志:\nTokenRefreshFailed",
+            }),
+          });
+        });
+      }
+
+      send() {}
+      close() { this.readyState = 3; this.onclose?.({}); }
+    }
+
+    Object.defineProperty(window, "WebSocket", { value: FakeWebSocket });
+  });
+
+  await page.goto(authedPath("/"));
+  await expect(page.getByText("app-server 初始化失败")).toBeVisible();
+  await expect(page.getByText("TokenRefreshFailed")).toBeVisible();
+  await expect(page.getByRole("button", { name: "重试" })).toBeVisible();
+  await expect(page.getByTitle("/status")).toBeDisabled();
 });
 
 test("rejects websocket connections without the auth token", async ({ page }) => {

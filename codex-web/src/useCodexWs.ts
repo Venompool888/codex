@@ -22,6 +22,7 @@ export type TurnEntry = {
 export type SlashResultEntry = { id: string; kind: "slash"; name: string; content: string };
 
 export type ChatEntry = UserEntry | TurnEntry | SlashResultEntry;
+export type ConnectionStatus = "connecting" | "connected" | "failed";
 
 export type ApprovalRequest =
   | { kind: "cmd"; id: string; command: string; cwd: string; reason?: string }
@@ -34,6 +35,8 @@ const uid = () => `${Date.now()}-${++seq}`;
 export function useCodexWs() {
   const wsRef = useRef<WebSocket | null>(null);
   const [connected, setConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
+  const [connectionError, setConnectionError] = useState("");
   const [thinking, setThinking] = useState(false);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [model, setModel] = useState("");
@@ -54,6 +57,7 @@ export function useCodexWs() {
   const currentTurnEntryId = useRef<string | null>(null);
   const currentTurnServerId = useRef<string | null>(null);
   const turnEntryIds = useRef(new Map<string, string>());
+  const connectionStatusRef = useRef<ConnectionStatus>("connecting");
 
   // input history
   const inputHistory = useRef<string[]>([]);
@@ -79,6 +83,11 @@ export function useCodexWs() {
     return inputHistory.current[historyIdx.current];
   }
   function resetHistoryIdx() { historyIdx.current = -1; }
+
+  function setStatus(status: ConnectionStatus) {
+    connectionStatusRef.current = status;
+    setConnectionStatus(status);
+  }
 
   function deserializeHistory(entries: SerializedHistoryEntry[]): ChatEntry[] {
     return entries.map((entry): ChatEntry => {
@@ -157,12 +166,23 @@ export function useCodexWs() {
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
+    setStatus("connecting");
+    setConnectionError("");
 
     ws.onopen = () => {
       // Wait for the app-server thread to finish initializing before enabling UI actions.
       setConnected(false);
+      setStatus("connecting");
     };
-    ws.onclose = () => { setConnected(false); setThinking(false); };
+    ws.onclose = () => {
+      const wasConnected = connectionStatusRef.current === "connected";
+      setConnected(false);
+      setThinking(false);
+      setStatus("failed");
+      setConnectionError(wasConnected
+        ? "codex app-server 连接已关闭。请刷新后重试。"
+        : "无法连接到 codex app-server。请检查服务端日志后重试。");
+    };
 
     ws.onmessage = ev => {
       let msg: ServerMsg;
@@ -171,9 +191,18 @@ export function useCodexWs() {
       switch (msg.type) {
         case "connected":
           setConnected(true);
+          setStatus("connected");
+          setConnectionError("");
           setThreadId(msg.threadId);
           setModel(msg.model);
           setCwd(msg.cwd);
+          break;
+
+        case "startup_failed":
+          setConnected(false);
+          setThinking(false);
+          setStatus("failed");
+          setConnectionError(msg.message);
           break;
 
         case "threads_list":
@@ -350,6 +379,12 @@ export function useCodexWs() {
 
         case "error":
           setThinking(false);
+          if (connectionStatusRef.current !== "connected") {
+            setConnected(false);
+            setStatus("failed");
+            setConnectionError(msg.message);
+            break;
+          }
           setEntries(prev => [...prev, {
             id: uid(), kind: "turn",
             items: new Map([["e", { id: "e", type: "error", message: msg.message }]]),
@@ -379,6 +414,8 @@ export function useCodexWs() {
     setEntries([]);
     setThreadId(null);
     setConnected(false);
+    setStatus("connecting");
+    setConnectionError("");
     setThinking(false);
     setApproval(null);
     setInputRequest(null);
@@ -397,6 +434,8 @@ export function useCodexWs() {
     setEntries([]);
     setThreadId(id);
     setConnected(false);
+    setStatus("connecting");
+    setConnectionError("");
     setThinking(false);
     setApproval(null);
     setInputRequest(null);
@@ -464,7 +503,7 @@ export function useCodexWs() {
   }, [rawSend]);
 
   return {
-    connected, thinking, threadId, model, effort, models, cwd, entries, approval,
+    connected, connectionStatus, connectionError, thinking, threadId, model, effort, models, cwd, entries, approval,
     threads, fileSearchQuery, fileSearchResults, config, mcpServers, inputRequest, mcpElicitation,
     send, interrupt, newThread, listThreads, resumeThread, respond, respondInput, respondMcpElicitation,
     slash, listFiles, searchFiles,
