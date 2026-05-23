@@ -1,3 +1,45 @@
+// ── Product model ─────────────────────────────────────────────────────────────
+export type WorkspaceRef = {
+  cwd: string;
+  label: string;
+};
+
+export type ProjectSummary = {
+  id: string;
+  name: string;
+  description: string;
+  workspace: WorkspaceRef;
+  updatedAt: number;
+  favorite: boolean;
+  tags: string[];
+};
+
+export type ProjectDetail = ProjectSummary & {
+  defaultView: "chat" | "tasks" | "files" | "search" | "options" | "settings";
+};
+
+export type TaskRunStatus = "idle" | "running" | "completed" | "failed" | "interrupted";
+
+export type TaskEvent = {
+  id: string;
+  type: "command" | "message" | "fileChange" | "error";
+  title: string;
+  detail: string;
+  createdAt: number;
+};
+
+export type TaskRun = {
+  id: string;
+  projectId: string;
+  status: TaskRunStatus;
+  title: string;
+  command: string | null;
+  cwd: string;
+  startedAt: number | null;
+  completedAt: number | null;
+  events: TaskEvent[];
+};
+
 // ── Browser → Server ─────────────────────────────────────────────────────────
 export type ClientMsg =
   | { type: "send"; text: string; mentions?: FileMention[] }

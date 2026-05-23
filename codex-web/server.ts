@@ -1,16 +1,20 @@
-import { createServer, IncomingMessage, ServerResponse } from "node:http";
-import { readFileSync, existsSync, readdirSync, lstatSync, realpathSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { readdirSync, lstatSync, realpathSync } from "node:fs";
 import { spawn, ChildProcess } from "node:child_process";
 import { createInterface, Interface } from "node:readline";
 import { WebSocketServer, WebSocket } from "ws";
-import type { Duplex } from "node:stream";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { CODEX_BIN, codexArgs, readConfig, type CodexConfig } from "./server/services/codexConfig.js";
+import { parseClientMsg, isJsonValue, isReasoningEffort } from "./server/services/clientMessages.js";
+import { handleApiRequest } from "./server/services/httpApi.js";
+import { ProjectRegistry } from "./server/services/projectRegistry.js";
+import { isPathInside, serveStatic } from "./server/services/staticFiles.js";
+import { rejectUpgrade, validateUpgradeRequest } from "./server/services/websocketAuth.js";
 import type {
-  ClientMsg, ServerMsg, AppItem, FileChange, FsEntry,
+  ServerMsg, AppItem, FileChange, FsEntry,
   ApprovalDecision, FileMention, ReasoningEffort, ModelInfo,
   ConfigKey, ConfigState, FileSearchResult, InputQuestion,
   JsonValue, McpElicitationAction, McpServerSummary, McpStartupSummary,
@@ -23,287 +27,9 @@ const DIST_CLIENT = path.resolve(__dirname, "dist/client");
 const isProd = process.env.NODE_ENV === "production";
 const execFileAsync = promisify(execFile);
 const CODEX_WEB_AUTH_TOKEN = process.env.CODEX_WEB_AUTH_TOKEN ?? "";
+const projects = new ProjectRegistry(process.cwd());
 
-const CODEX_BIN =
-  process.env.CODEX_BIN ??
-  "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex";
 const REPO_MODEL_CATALOG = path.resolve(__dirname, "../codex-rs/models-manager/models.json");
-
-const MIME: Record<string, string> = {
-  ".html": "text/html", ".js": "application/javascript",
-  ".css": "text/css", ".ico": "image/x-icon",
-  ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2",
-};
-
-// ── Static file serving ───────────────────────────────────────────────────────
-function isPathInside(parent: string, child: string) {
-  const rel = path.relative(parent, child);
-  return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
-function resolveStaticPath(reqUrl: string | undefined): string | null {
-  let pathname: string;
-  try {
-    pathname = new URL(reqUrl ?? "/", "http://codex-web.local").pathname;
-  } catch {
-    return null;
-  }
-
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(pathname);
-  } catch {
-    return null;
-  }
-  if (decoded.split(/[\\/]+/).includes("..")) return null;
-
-  const relative = decoded === "/" ? "index.html" : decoded.replace(/^\/+/, "");
-  const normalized = path.normalize(relative);
-  if (normalized.startsWith("..") || path.isAbsolute(normalized)) return null;
-
-  const requested = path.resolve(DIST_CLIENT, normalized);
-  if (!isPathInside(DIST_CLIENT, requested)) return null;
-
-  const fallback = path.resolve(DIST_CLIENT, "index.html");
-  return existsSync(requested) ? requested : fallback;
-}
-
-async function serveStatic(req: IncomingMessage, res: ServerResponse) {
-  if (!isProd) { res.writeHead(404); res.end("Dev mode"); return; }
-  const fp = resolveStaticPath(req.url);
-  if (!fp) { res.writeHead(404); res.end("Not found"); return; }
-  const ext = path.extname(fp);
-  readFile(fp).then(data => {
-    res.writeHead(200, { "Content-Type": MIME[ext] ?? "text/plain" });
-    res.end(data);
-  }).catch(() => { res.writeHead(404); res.end("Not found"); });
-}
-
-// ── Config helpers ────────────────────────────────────────────────────────────
-type CodexConfig = {
-  model: string;
-  effort: ReasoningEffort;
-  baseUrl: string;
-  modelCatalogJson: string;
-};
-
-function readConfig(): CodexConfig {
-  try {
-    const home = process.env.HOME ?? "/root";
-    const toml = readFileSync(path.join(home, ".codex/config.toml"), "utf8");
-    const model = toml.match(/^model\s*=\s*"([^"]+)"/m)?.[1] ?? "unknown";
-    const effort = (toml.match(/^model_reasoning_effort\s*=\s*"([^"]+)"/m)?.[1] ?? "high") as ReasoningEffort;
-    const baseUrl = toml.match(/^base_url\s*=\s*"([^"]+)"/m)?.[1] ?? "";
-    const modelCatalogJson = toml.match(/^model_catalog_json\s*=\s*"([^"]+)"/m)?.[1] ?? "";
-    return { model, effort, baseUrl, modelCatalogJson };
-  } catch { return { model: "unknown", effort: "high", baseUrl: "", modelCatalogJson: "" }; }
-}
-
-function codexArgs(config: CodexConfig): string[] {
-  const args = ["app-server"];
-  const modelCatalogJson =
-    process.env.CODEX_WEB_MODEL_CATALOG_JSON ??
-    (config.baseUrl && !config.modelCatalogJson && existsSync(REPO_MODEL_CATALOG)
-      ? REPO_MODEL_CATALOG
-      : "");
-
-  if (modelCatalogJson && process.env.CODEX_WEB_MODEL_CATALOG_JSON !== "off") {
-    args.push("-c", `model_catalog_json=${JSON.stringify(modelCatalogJson)}`);
-  }
-
-  args.push("--listen", "stdio://");
-  return args;
-}
-
-function getHeaderValue(value: string | string[] | undefined): string {
-  return Array.isArray(value) ? value[0] ?? "" : value ?? "";
-}
-
-function hostNameFromHeader(host: string): string {
-  try {
-    return new URL(`http://${host}`).hostname;
-  } catch {
-    return "";
-  }
-}
-
-function isLoopbackHost(hostname: string): boolean {
-  const h = hostname.toLowerCase();
-  return h === "localhost" || h === "::1" || h === "[::1]" || h.startsWith("127.");
-}
-
-function isOriginAllowed(req: IncomingMessage): boolean {
-  const origin = getHeaderValue(req.headers.origin);
-  if (!origin) return true;
-
-  try {
-    const originUrl = new URL(origin);
-    const requestHost = getHeaderValue(req.headers.host);
-    return originUrl.host === requestHost || isLoopbackHost(originUrl.hostname);
-  } catch {
-    return false;
-  }
-}
-
-function bearerToken(req: IncomingMessage): string {
-  const auth = getHeaderValue(req.headers.authorization);
-  const prefix = "Bearer ";
-  return auth.startsWith(prefix) ? auth.slice(prefix.length) : "";
-}
-
-function websocketToken(req: IncomingMessage): string {
-  try {
-    const url = new URL(req.url ?? "", "http://codex-web.local");
-    return url.searchParams.get("token") ?? bearerToken(req);
-  } catch {
-    return bearerToken(req);
-  }
-}
-
-function validateUpgradeRequest(req: IncomingMessage): string | null {
-  let pathname = "";
-  try {
-    pathname = new URL(req.url ?? "", "http://codex-web.local").pathname;
-  } catch {
-    return "Bad request";
-  }
-  if (pathname !== "/ws") return "Not found";
-
-  const host = hostNameFromHeader(getHeaderValue(req.headers.host));
-  if (!CODEX_WEB_AUTH_TOKEN && !isLoopbackHost(host)) {
-    return "Set CODEX_WEB_AUTH_TOKEN before exposing codex-web off localhost";
-  }
-
-  if (CODEX_WEB_AUTH_TOKEN && websocketToken(req) !== CODEX_WEB_AUTH_TOKEN) {
-    return "Unauthorized";
-  }
-
-  if (!isOriginAllowed(req)) {
-    return "Forbidden origin";
-  }
-
-  return null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, message: string) {
-  socket.write(
-    `HTTP/1.1 ${status} ${message}\r\n` +
-    "Connection: close\r\n" +
-    "Content-Type: text/plain\r\n" +
-    `Content-Length: ${Buffer.byteLength(message)}\r\n` +
-    "\r\n" +
-    message,
-  );
-  socket.destroy();
-}
-
-function isObj(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isReasoningEffort(value: unknown): value is ReasoningEffort {
-  return value === "none" || value === "minimal" || value === "low" ||
-    value === "medium" || value === "high" || value === "xhigh";
-}
-
-function isApprovalDecision(value: unknown): value is ApprovalDecision {
-  return value === "accept" || value === "acceptForSession" ||
-    value === "decline" || value === "cancel";
-}
-
-function isMcpElicitationAction(value: unknown): value is McpElicitationAction {
-  return value === "accept" || value === "decline" || value === "cancel";
-}
-
-function isConfigKey(value: unknown): value is ConfigKey {
-  return value === "model" || value === "model_reasoning_effort" ||
-    value === "approval_policy" || value === "sandbox_mode" || value === "web_search";
-}
-
-function validString(value: unknown, max = 100_000): value is string {
-  return typeof value === "string" && value.length <= max;
-}
-
-function isJsonValue(value: unknown): value is JsonValue {
-  if (value === null) return true;
-  const t = typeof value;
-  if (t === "string" || t === "number" || t === "boolean") return Number.isFinite(value as number) || t !== "number";
-  if (Array.isArray(value)) return value.every(isJsonValue);
-  if (isObj(value)) return Object.values(value).every(isJsonValue);
-  return false;
-}
-
-function parseMentions(value: unknown): FileMention[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((m): FileMention[] => {
-    if (!isObj(m) || !validString(m.name, 256) || !validString(m.path, 4096)) return [];
-    return [{ name: m.name, path: m.path }];
-  });
-}
-
-function parseAnswers(value: unknown): Record<string, string[]> | null {
-  if (!isObj(value)) return null;
-  const answers: Record<string, string[]> = {};
-  for (const [key, raw] of Object.entries(value)) {
-    if (!validString(key, 128) || !Array.isArray(raw)) return null;
-    const values = raw.filter((v): v is string => validString(v, 20_000));
-    if (values.length !== raw.length) return null;
-    answers[key] = values;
-  }
-  return answers;
-}
-
-function parseClientMsg(raw: string): ClientMsg | null {
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch { return null; }
-  if (!isObj(parsed) || typeof parsed.type !== "string") return null;
-
-  switch (parsed.type) {
-    case "send":
-      return validString(parsed.text) ? { type: "send", text: parsed.text, mentions: parseMentions(parsed.mentions) } : null;
-    case "interrupt":
-    case "new_thread":
-    case "list_threads":
-    case "read_config":
-    case "list_mcp":
-    case "list_models":
-      return { type: parsed.type };
-    case "resume_thread":
-      return validString(parsed.threadId, 128) ? { type: "resume_thread", threadId: parsed.threadId } : null;
-    case "approve":
-      return validString(parsed.id, 128) && isApprovalDecision(parsed.decision)
-        ? { type: "approve", id: parsed.id, decision: parsed.decision }
-        : null;
-    case "respond_input": {
-      const answers = parseAnswers(parsed.answers);
-      return validString(parsed.id, 128) && answers
-        ? { type: "respond_input", id: parsed.id, answers }
-        : null;
-    }
-    case "respond_mcp_elicitation":
-      return validString(parsed.id, 128) && isMcpElicitationAction(parsed.action) && isJsonValue(parsed.content)
-        ? { type: "respond_mcp_elicitation", id: parsed.id, action: parsed.action, content: parsed.content }
-        : null;
-    case "slash":
-      return validString(parsed.name, 64) && /^[a-z][a-z0-9_-]*$/i.test(parsed.name) && validString(parsed.args, 20_000)
-        ? { type: "slash", name: parsed.name, args: parsed.args }
-        : null;
-    case "fs_list":
-      return validString(parsed.path, 4096) ? { type: "fs_list", path: parsed.path } : null;
-    case "fuzzy_file_search":
-      return validString(parsed.query, 512) ? { type: "fuzzy_file_search", query: parsed.query } : null;
-    case "set_model":
-      return validString(parsed.model, 256) ? { type: "set_model", model: parsed.model } : null;
-    case "set_effort":
-      return isReasoningEffort(parsed.effort) ? { type: "set_effort", effort: parsed.effort } : null;
-    case "write_config":
-      return isConfigKey(parsed.key) && validString(parsed.value, 4096)
-        ? { type: "write_config", key: parsed.key, value: parsed.value }
-        : null;
-    default:
-      return null;
-  }
-}
 
 // ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 type RpcMsg =
@@ -337,7 +63,7 @@ class CodexSession {
   constructor(private ws: WebSocket, private cwd: string, private model: string) {
     this.config = readConfig();
     this.workspaceRoot = realpathSync(cwd);
-    this.proc = spawn(CODEX_BIN, codexArgs(this.config), {
+    this.proc = spawn(CODEX_BIN, codexArgs(this.config, REPO_MODEL_CATALOG), {
       cwd, env: { ...process.env },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -1180,11 +906,14 @@ class CodexSession {
 }
 
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────
-const httpServer = createServer(serveStatic);
+const httpServer = createServer((req, res) => {
+  if (handleApiRequest(req, res, projects)) return;
+  void serveStatic(req, res, DIST_CLIENT, isProd);
+});
 const wss = new WebSocketServer({ noServer: true });
 
 httpServer.on("upgrade", (req, socket, head) => {
-  const rejection = validateUpgradeRequest(req);
+  const rejection = validateUpgradeRequest(req, CODEX_WEB_AUTH_TOKEN);
   if (rejection) {
     rejectUpgrade(socket, rejection === "Unauthorized" ? 401 : rejection === "Not found" ? 404 : 403, rejection);
     return;

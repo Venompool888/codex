@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "outDir": "dist"
   },
-  "include": ["src", "server.ts", "shared.ts"]
+  "include": ["src", "server", "server.ts", "shared.ts"]
 }
