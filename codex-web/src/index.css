@@ -537,6 +537,13 @@ footer { border-top:1px solid rgba(58,70,83,.62); background:rgba(9,13,18,.98); 
 .app-main .chat-workspace > header .header-actions {
   flex:0 0 auto;
 }
+.app-main .chat-workspace > header .hbtn-model,
+.app-main .chat-workspace > header .effort-pills {
+  flex:0 0 auto;
+}
+.app-main .chat-workspace > header .hbtn-model {
+  min-width:88px;
+}
 .app-inspector {
   min-width:0;
   min-height:0;
