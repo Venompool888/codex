@@ -1,1 +1,1 @@
-export type ProductView = "chat" | "tasks" | "files" | "search" | "options" | "settings";
+export type ProductView = "chat" | "tasks" | "files" | "options" | "remote";

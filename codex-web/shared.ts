@@ -15,7 +15,7 @@ export type ProjectSummary = {
 };
 
 export type ProjectDetail = ProjectSummary & {
-  defaultView: "chat" | "tasks" | "files" | "search" | "options" | "settings";
+  defaultView: "chat" | "tasks" | "files" | "options" | "remote";
 };
 
 export type TaskRunStatus = "idle" | "running" | "completed" | "failed" | "interrupted";

@@ -3,8 +3,8 @@ import { useCodexSession, ConnectionStatus, TurnEntry } from "./CodexSessionCont
 import { ApprovalModal } from "../../ApprovalModal";
 import { SlashMenu } from "../../SlashMenu";
 import type {
-  AppItem, ConfigKey, ConfigState, FileMention, FileSearchResult,
-  InputRequest, JsonValue, McpElicitationRequest, McpServerSummary,
+  AppItem, FileMention, FileSearchResult,
+  InputRequest, JsonValue, McpElicitationRequest,
   TokenUsage, ReasoningEffort, ModelInfo, ThreadSummary,
 } from "../../../shared";
 import { marked } from "marked";
@@ -16,10 +16,10 @@ marked.setOptions({ async: false, breaks: true, gfm: true });
 export function ChatWorkspace() {
   const {
     connected, connectionStatus, connectionError, thinking, threadId, model, effort, models, cwd, entries, approval,
-    threads, fileSearchResults, config, mcpServers, inputRequest, mcpElicitation,
+    threads, fileSearchResults, inputRequest, mcpElicitation,
     send, interrupt, newThread, listThreads, resumeThread, respond, respondInput, respondMcpElicitation,
     slash, searchFiles,
-    changeModel, changeEffort, listModels, readConfig, writeConfig, listMcp,
+    changeModel, changeEffort, listModels,
     historyUp, historyDown, resetHistoryIdx,
   } = useCodexSession();
 
@@ -28,8 +28,6 @@ export function ChatWorkspace() {
   const [showSlash, setShowSlash] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showThreads, setShowThreads] = useState(() => !isCompactViewport());
-  const [showConfig, setShowConfig] = useState(false);
-  const [showMcp, setShowMcp] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -123,16 +121,6 @@ export function ChatWorkspace() {
     setShowModelPicker(true);
   }
 
-  function openConfig() {
-    readConfig();
-    setShowConfig(true);
-  }
-
-  function openMcp() {
-    listMcp();
-    setShowMcp(true);
-  }
-
   const shortCwd = cwd.replace(/^\/root(?=\/|$)/, "~");
   const statusLabel = connectionStatus === "connected" ? "已连接"
     : connectionStatus === "failed" ? "初始化失败" : "连接中";
@@ -140,10 +128,13 @@ export function ChatWorkspace() {
   return (
     <div className="chat-workspace">
       <header>
-        <span className="brand">Codex</span>
+        <span className="brand">Codex Remote</span>
         <span className={`dot ${connectionStatus}`} title={statusLabel} />
         <span className={`status-label s-${connectionStatus}`}>{statusLabel}</span>
         <div className="header-meta">
+          <span className="hinfo session-label">Session</span>
+          {threadId && <><span className="hsep">·</span><span className="hinfo mono">#{threadId.slice(0, 8)}</span></>}
+          <span className="hsep">·</span>
           <button className="hbtn-model" onClick={openModelPicker} title="切换模型" disabled={!connected}>
             {model || "…"}
           </button>
@@ -151,13 +142,11 @@ export function ChatWorkspace() {
           <EffortPills effort={effort} onChange={changeEffort} disabled={!connected} />
           <span className="hsep">·</span>
           <span className="hinfo cwd" title={cwd}>{shortCwd}</span>
-          {threadId && <><span className="hsep">·</span><span className="hinfo mono">#{threadId.slice(0, 8)}</span></>}
         </div>
         <div className="header-actions">
-          <button className="btn-icon" onClick={() => { listThreads(); setShowThreads(v => !v); }} title="线程历史" aria-label="线程历史" disabled={!connected}>☰</button>
-          <button className="btn-icon" onClick={openConfig} title="配置" aria-label="配置" disabled={!connected}>⚙</button>
-          <button className="btn-icon" onClick={openMcp} title="MCP 状态" aria-label="MCP 状态" disabled={!connected}>◈</button>
-          <button className="btn-icon" onClick={newThread} title="/new" aria-label="新线程" disabled={!connected}>＋</button>
+          <button className="btn-icon" onClick={() => { listThreads(); setShowThreads(true); }} title="Session 列表" aria-label="Session 列表" disabled={!connected}>☰</button>
+          <button className="btn-icon" onClick={newThread} title="新建 Session" aria-label="新建 Session" disabled={!connected}>＋</button>
+          <button className="btn-icon" onClick={interrupt} title="中断任务" aria-label="中断任务" disabled={!connected || !thinking}>■</button>
           <button className="btn-icon" onClick={() => slash("diff")} title="/diff" aria-label="Diff" disabled={!connected}>±</button>
           <button className="btn-icon" onClick={() => slash("status")} title="/status" aria-label="状态" disabled={!connected}>ⓘ</button>
         </div>
@@ -245,22 +234,6 @@ export function ChatWorkspace() {
       {approval && <ApprovalModal req={approval} onDecide={respond} />}
       {inputRequest && <InputRequestModal request={inputRequest} onSubmit={respondInput} />}
       {mcpElicitation && <McpElicitationModal request={mcpElicitation} onRespond={respondMcpElicitation} />}
-      {showConfig && config && (
-        <ConfigPanel
-          config={config}
-          onWrite={writeConfig}
-          onRefresh={readConfig}
-          onClose={() => setShowConfig(false)}
-        />
-      )}
-      {showMcp && (
-        <McpPanel
-          servers={mcpServers}
-          onRefresh={listMcp}
-          onClose={() => setShowMcp(false)}
-        />
-      )}
-
       {showModelPicker && (
         <ModelPicker
           models={models}
@@ -548,11 +521,11 @@ function ThreadSidebar({ threads, currentThreadId, onRefresh, onResume, disabled
   return (
     <aside className="thread-sidebar">
       <div className="side-title">
-        <span>线程</span>
+        <span>Session</span>
         <button className="mini-btn" onClick={onRefresh} disabled={disabled}>刷新</button>
       </div>
       <div className="thread-list">
-        {threads.length === 0 && <div className="side-empty">暂无历史</div>}
+        {threads.length === 0 && <div className="side-empty">暂无 Session 历史</div>}
         {threads.map(thread => (
           <button
             key={thread.id}
@@ -561,7 +534,7 @@ function ThreadSidebar({ threads, currentThreadId, onRefresh, onResume, disabled
             disabled={disabled || thread.id === currentThreadId}
             title={thread.cwd}
           >
-            <span className="thread-title">{thread.name || thread.preview || "未命名线程"}</span>
+            <span className="thread-title">{thread.name || thread.preview || "未命名 Session"}</span>
             <span className="thread-meta">{formatDate(thread.updatedAt)} · {thread.status}</span>
             <span className="thread-id">#{thread.id.slice(0, 8)}</span>
           </button>
@@ -583,95 +556,6 @@ function FileMentionMenu({ files, onSelect }: {
           <span className="file-path">{file.path}</span>
         </button>
       ))}
-    </div>
-  );
-}
-
-function ConfigPanel({ config, onWrite, onRefresh, onClose }: {
-  config: ConfigState;
-  onWrite: (key: ConfigKey, value: string) => void;
-  onRefresh: () => void;
-  onClose: () => void;
-}) {
-  const [draftModel, setDraftModel] = useState(config.model);
-
-  useEffect(() => setDraftModel(config.model), [config.model]);
-
-  return (
-    <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal panel-modal">
-        <div className="panel-title">
-          <span>配置</span>
-          <button className="mini-btn" onClick={onRefresh}>刷新</button>
-        </div>
-        <label className="config-field">
-          <span>默认模型</span>
-          <div className="inline-edit">
-            <input value={draftModel} onChange={e => setDraftModel(e.target.value)} />
-            <button className="mini-btn" onClick={() => onWrite("model", draftModel)}>保存</button>
-          </div>
-        </label>
-        <ConfigSelect label="默认推理力度" value={config.modelReasoningEffort} options={["none", "minimal", "low", "medium", "high", "xhigh"]} onChange={v => onWrite("model_reasoning_effort", v)} />
-        <ConfigSelect label="审批策略" value={config.approvalPolicy} options={["untrusted", "on-failure", "on-request", "never"]} onChange={v => onWrite("approval_policy", v)} />
-        <ConfigSelect label="沙箱模式" value={config.sandboxMode} options={["read-only", "workspace-write", "danger-full-access"]} onChange={v => onWrite("sandbox_mode", v)} />
-        <ConfigSelect label="Web Search" value={config.webSearch} options={["disabled", "cached", "live"]} onChange={v => onWrite("web_search", v)} />
-        <div className="modal-actions">
-          <button className="btn-reject" onClick={onClose}>关闭</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ConfigSelect({ label, value, options, onChange }: {
-  label: string;
-  value: string;
-  options: string[];
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="config-field">
-      <span>{label}</span>
-      <select value={value} onChange={e => onChange(e.target.value)}>
-        {options.map(option => <option key={option} value={option}>{option}</option>)}
-      </select>
-    </label>
-  );
-}
-
-function McpPanel({ servers, onRefresh, onClose }: {
-  servers: McpServerSummary[];
-  onRefresh: () => void;
-  onClose: () => void;
-}) {
-  return (
-    <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal panel-modal">
-        <div className="panel-title">
-          <span>MCP 状态</span>
-          <button className="mini-btn" onClick={onRefresh}>刷新</button>
-        </div>
-        {servers.length === 0 && <div className="side-empty">没有 MCP server</div>}
-        {servers.map(server => (
-          <div key={server.name} className="mcp-server-row">
-            <div className="mcp-server-head">
-              <strong>{server.name}</strong>
-              <span>{server.startupStatus ?? "configured"}</span>
-            </div>
-            <div className="mcp-server-meta">
-              auth: {server.authStatus} · tools: {server.tools.length} · resources: {server.resourceCount}
-              {server.resourceTemplateCount > 0 && ` · templates: ${server.resourceTemplateCount}`}
-            </div>
-            {server.tools.length > 0 && (
-              <div className="mcp-tools">{server.tools.slice(0, 8).map(tool => <code key={tool}>{tool}</code>)}</div>
-            )}
-            {server.error && <pre className="cmd-out err">{server.error}</pre>}
-          </div>
-        ))}
-        <div className="modal-actions">
-          <button className="btn-reject" onClick={onClose}>关闭</button>
-        </div>
-      </div>
     </div>
   );
 }
@@ -880,7 +764,7 @@ function ModelPicker({ models, current, onSelect, onClose }: {
   return (
     <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="modal" style={{ maxWidth: 500 }}>
-        <div className="modal-title">切换模型</div>
+        <div className="modal-title">选择 Session 模型</div>
         {models.length === 0
           ? <div style={{ color: "var(--muted)", fontSize: 13 }}>加载中…</div>
           : models.map(m => (

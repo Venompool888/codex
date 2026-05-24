@@ -50,6 +50,7 @@ button, textarea, input, select { font: inherit; }
 .project-error { color:#ffb6bb; background:rgba(44,12,16,.72); border-bottom:1px solid rgba(255,115,115,.28); padding:8px 18px; font-size:12px; }
 .product-page { flex:1; min-height:0; overflow:auto; padding:24px; display:flex; flex-direction:column; gap:16px; }
 .product-page h2 { font-size:22px; letter-spacing:0; }
+.page-copy { color:var(--muted); margin-top:-8px; }
 .page-title-row { display:flex; justify-content:space-between; align-items:center; gap:12px; }
 .page-title-row p { color:var(--muted); margin-top:4px; }
 .page-status { width:10px; height:10px; border-radius:50%; background:var(--muted2); flex-shrink:0; }
@@ -62,6 +63,9 @@ button, textarea, input, select { font: inherit; }
 .task-card pre, .file-change-card pre { margin-top:8px; white-space:pre-wrap; word-break:break-word; font-family:var(--mono); font-size:12px; color:#b6c0ca; background:rgba(3,5,7,.46); border-radius:6px; padding:10px; }
 .file-change-list, .settings-list, .search-results { display:flex; flex-direction:column; gap:10px; }
 .file-change-card div, .setting-row, .search-result-row { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+.danger-row { border-color:rgba(240,109,116,.38); background:rgba(54,18,22,.52); }
+.danger-row span { color:#ffb6bb; }
+.remote-note { line-height:1.6; }
 .file-change-card strong, .search-result-row strong { font-family:var(--mono); font-size:13px; }
 .change-kind { color:var(--muted); font-family:var(--mono); font-size:11px; text-transform:uppercase; }
 .change-kind.k-add { color:var(--green); }
@@ -87,6 +91,7 @@ header { display:flex; align-items:center; gap:10px; min-height:50px; padding:8p
 .status-label.s-failed { color:#ffb6bb; }
 .hinfo { color:var(--muted); } .hinfo.cwd { font-family:var(--mono); font-size:12px; max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .hinfo.mono { font-family:var(--mono); font-size:11px; }
+.session-label { color:#98e7cf; font-weight:650; }
 .hsep { color:var(--border); }
 .header-meta { display:flex; gap:9px; align-items:center; min-width:0; }
 .header-actions { margin-left:auto; display:flex; gap:5px; align-items:center; }

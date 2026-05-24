@@ -5,9 +5,8 @@ const viewLabels: Record<ProductView, string> = {
   chat: "对话",
   tasks: "任务",
   files: "文件变更",
-  search: "搜索",
   options: "项目选项",
-  settings: "设置",
+  remote: "Remote",
 };
 
 export function ProjectHeader({
@@ -19,11 +18,11 @@ export function ProjectHeader({
   activeView: ProductView;
   onViewChange: (view: ProductView) => void;
 }) {
-  const views: ProductView[] = ["chat", "tasks", "files", "search", "options", "settings"];
+  const views: ProductView[] = ["chat", "tasks", "files", "options", "remote"];
   return (
     <header className="project-header">
       <div className="project-title-block">
-        <p>Codex Web</p>
+        <p>Codex Remote · 远程 CLI 控制工作台</p>
         <h1>{project?.name ?? "codex-web"}</h1>
         <span>{project?.workspace.cwd ?? "Loading workspace"}</span>
       </div>

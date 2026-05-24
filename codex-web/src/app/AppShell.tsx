@@ -7,8 +7,7 @@ import { ProjectOptionsPage } from "../features/project-options/ProjectOptionsPa
 import { fetchProjects } from "../features/projects/projectApi";
 import { ProjectHeader } from "../features/projects/ProjectHeader";
 import { ProjectList } from "../features/projects/ProjectList";
-import { SearchPage } from "../features/search/SearchPage";
-import { SettingsPage } from "../features/settings/SettingsPage";
+import { RemoteStatusPage } from "../features/remote/RemoteStatusPage";
 import { TaskDetail } from "../features/tasks/TaskDetail";
 import type { ProductView } from "./productViews";
 
@@ -50,9 +49,8 @@ export function AppShell() {
             {activeView === "chat" && <ChatWorkspace />}
             {activeView === "tasks" && <TaskDetail />}
             {activeView === "files" && <FileChangesPage />}
-            {activeView === "search" && <SearchPage />}
             {activeView === "options" && <ProjectOptionsPage project={activeProject} />}
-            {activeView === "settings" && <SettingsPage />}
+            {activeView === "remote" && <RemoteStatusPage />}
           </div>
         </div>
       </div>

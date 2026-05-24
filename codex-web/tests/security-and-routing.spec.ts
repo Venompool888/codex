@@ -294,7 +294,7 @@ test("updates file approval modal when real diff arrives", async ({ page }) => {
   await expect(page.getByText("+new")).toBeVisible();
 });
 
-test("opens config and MCP panels from websocket data", async ({ page }) => {
+test("renders remote status from config data without writable config panels", async ({ page }) => {
   await page.addInitScript(() => {
     class FakeWebSocket {
       static OPEN = 1;
@@ -332,14 +332,18 @@ test("opens config and MCP panels from websocket data", async ({ page }) => {
   });
 
   await page.goto(authedPath("/"));
-  await page.getByTitle("配置").click();
-  await expect(page.getByText("审批策略")).toBeVisible();
-  await expect(page.locator("select").filter({ hasText: "on-request" })).toBeVisible();
-  await page.getByText("关闭").click();
+  await expect(page.getByTitle("配置")).toHaveCount(0);
+  await expect(page.getByTitle("MCP 状态")).toHaveCount(0);
 
-  await page.getByTitle("MCP 状态").click();
-  await expect(page.getByText("filesystem")).toBeVisible();
-  await expect(page.getByText("read_file")).toBeVisible();
+  await page.getByRole("button", { name: "Remote", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Remote 状态" })).toBeVisible();
+  await expect(page.getByText("审批策略")).toBeVisible();
+  await expect(page.getByText("on-request")).toBeVisible();
+  await expect(page.getByText("沙箱模式")).toBeVisible();
+  await expect(page.getByText("workspace-write")).toBeVisible();
+  await expect(page.locator("select")).toHaveCount(0);
+  await expect(page.getByText("filesystem")).toHaveCount(0);
+  await expect(page.getByText("read_file")).toHaveCount(0);
 });
 
 test("submits request_user_input answers", async ({ page }) => {
