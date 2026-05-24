@@ -202,8 +202,19 @@ test("renders the Codex Remote project and session control loop", async ({ page 
 
   await page.goto(authedPath("/"));
 
-  await expect(page.getByText("Codex Remote", { exact: true })).toBeVisible();
-  await expect(page.getByText("远程 CLI 控制工作台")).toBeVisible();
+  await expect(page.locator(".product-shell.desktop-shell")).toBeVisible();
+  await expect(page.locator(".app-sidebar")).toBeVisible();
+  await expect(page.locator(".app-main")).toBeVisible();
+  await expect(page.locator(".app-inspector")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "全局导航" })).toContainText("Projects");
+  await expect(page.getByRole("navigation", { name: "全局导航" })).toContainText("Sessions");
+  await expect(page.getByRole("navigation", { name: "全局导航" })).toContainText("Tasks");
+  await expect(page.getByRole("navigation", { name: "全局导航" })).toContainText("Files");
+  await expect(page.getByRole("complementary", { name: "运行摘要" })).toContainText("Progress");
+  await expect(page.getByRole("complementary", { name: "运行摘要" })).toContainText("Outputs");
+
+  await expect(page.locator(".brand")).toHaveText("Codex Remote");
+  await expect(page.getByLabel("Codex Remote sidebar").getByText("远程 CLI 控制工作台", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "codex-web" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "项目导航" })).toContainText("对话");
   await expect(page.getByRole("navigation", { name: "项目导航" })).not.toContainText("搜索");
@@ -213,7 +224,7 @@ test("renders the Codex Remote project and session control loop", async ({ page 
   await expect(page.getByRole("button", { name: "Remote", exact: true })).toBeVisible();
 
   await expect(page.locator(".session-label")).toHaveText("Session");
-  await expect(page.getByText("#session-")).toBeVisible();
+  await expect(page.locator(".header-meta .hinfo.mono")).toContainText("#session-");
   await expect(page.getByTitle("切换模型")).toContainText("gpt-test");
   await expect(page.getByRole("button", { name: "high" })).toHaveClass(/active/);
   await expect(page.locator(".hinfo.cwd")).toHaveAttribute("title", "/root/codex/codex-web");
@@ -236,11 +247,11 @@ test("renders the Codex Remote project and session control loop", async ({ page 
 
   await page.getByRole("button", { name: "任务", exact: true }).click();
   await expect(page.getByRole("heading", { name: "运行任务详情" })).toBeVisible();
-  await expect(page.getByText("pnpm build")).toBeVisible();
+  await expect(page.locator(".task-page").getByText("pnpm build")).toBeVisible();
 
   await page.getByRole("button", { name: "文件变更", exact: true }).click();
   await expect(page.getByRole("heading", { name: "文件变更" })).toBeVisible();
-  await expect(page.getByText("src/app/AppShell.tsx")).toBeVisible();
+  await expect(page.locator(".files-page").getByText("src/app/AppShell.tsx")).toBeVisible();
 
   await page.getByRole("button", { name: "Remote", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Remote 状态" })).toBeVisible();
@@ -250,4 +261,8 @@ test("renders the Codex Remote project and session control loop", async ({ page 
   await expect(page.getByText("API Key")).toHaveCount(0);
   await expect(page.getByText("账号")).toHaveCount(0);
   await expect(page.getByText("登录")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "New Session", exact: true }).click();
+  const messagesAfterNewSession = await page.evaluate(() => (window as any).__sentMessages);
+  expect(messagesAfterNewSession).toContainEqual({ type: "new_thread" });
 });
