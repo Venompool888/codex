@@ -544,6 +544,14 @@ footer { border-top:1px solid rgba(58,70,83,.62); background:rgba(9,13,18,.98); 
 .app-main .chat-workspace > header .hbtn-model {
   min-width:88px;
 }
+.app-main .chat-workspace > header .effort-pill {
+  flex:0 0 auto;
+  min-width:42px;
+  text-align:center;
+}
+.app-main .chat-workspace > header .hinfo.cwd {
+  display:none;
+}
 .app-inspector {
   min-width:0;
   min-height:0;
