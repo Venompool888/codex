@@ -555,6 +555,9 @@ footer { border-top:1px solid rgba(58,70,83,.62); background:rgba(9,13,18,.98); 
 .app-main .chat-workspace > header .hinfo.mono {
   display:none;
 }
+.app-main .chat-workspace > header .hsep {
+  display:none;
+}
 .app-inspector {
   min-width:0;
   min-height:0;
