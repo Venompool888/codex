@@ -8,3 +8,5 @@ mod store;
 mod workspaces;
 
 pub use routes::build_router;
+pub use store::SetupState;
+pub use store::Store;
