@@ -1,5 +1,7 @@
 use axum::Json;
 use axum::Router;
+use axum::extract::Path as AxumPath;
+use axum::extract::RawQuery;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -14,7 +16,12 @@ use crate::auth::generate_token;
 use crate::auth::hash_token;
 use crate::auth::verify_token;
 use crate::config::Config;
+use crate::models::DiffSummary;
+use crate::models::FileEntry;
+use crate::models::Workspace;
 use crate::store::CompleteSetupError;
+use crate::workspaces::WorkspaceRoot;
+use crate::workspaces::workspace_roots;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -48,7 +55,19 @@ pub fn build_router(config: Config) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/setup", post(setup))
-        .route("/api/workspaces", get(workspaces))
+        .route("/api/workspaces", get(list_workspaces))
+        .route(
+            "/api/workspaces/{workspace_id}/files",
+            get(list_workspace_files),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/file",
+            get(read_workspace_file),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/diff",
+            get(workspace_diff_summary),
+        )
         .with_state(state)
 }
 
@@ -91,8 +110,108 @@ async fn setup(
     Ok(Json(SetupResponse { session_token }))
 }
 
-async fn workspaces(_auth: Authenticated) -> Json<Vec<serde_json::Value>> {
-    Json(Vec::new())
+async fn list_workspaces(
+    _auth: Authenticated,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Workspace>>, StatusCode> {
+    let roots = workspace_roots(state.config.workspaces()).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let sessions = state
+        .store
+        .sessions()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut workspaces = Vec::with_capacity(roots.len());
+    for root in &roots {
+        let last_session_id = sessions
+            .iter()
+            .filter(|session| session.workspace_id == root.id())
+            .max_by_key(|session| session.updated_at)
+            .map(|session| session.id.clone());
+        workspaces.push(root.to_workspace(last_session_id).await);
+    }
+
+    Ok(Json(workspaces))
+}
+
+async fn list_workspace_files(
+    _auth: Authenticated,
+    State(state): State<AppState>,
+    AxumPath(workspace_id): AxumPath<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<Vec<FileEntry>>, StatusCode> {
+    let root = workspace_by_id(&state, &workspace_id)?;
+    let path = query_path(query.as_deref()).ok_or(StatusCode::BAD_REQUEST)?;
+    root.list_files(&path)
+        .map(Json)
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+async fn read_workspace_file(
+    _auth: Authenticated,
+    State(state): State<AppState>,
+    AxumPath(workspace_id): AxumPath<String>,
+    RawQuery(query): RawQuery,
+) -> Result<String, StatusCode> {
+    let root = workspace_by_id(&state, &workspace_id)?;
+    let path = query_path(query.as_deref()).ok_or(StatusCode::BAD_REQUEST)?;
+    root.read_file(&path).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+async fn workspace_diff_summary(
+    _auth: Authenticated,
+    State(state): State<AppState>,
+    AxumPath(workspace_id): AxumPath<String>,
+) -> Result<Json<DiffSummary>, StatusCode> {
+    let root = workspace_by_id(&state, &workspace_id)?;
+    root.diff_summary()
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+fn workspace_by_id(state: &AppState, workspace_id: &str) -> Result<WorkspaceRoot, StatusCode> {
+    workspace_roots(state.config.workspaces())
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .into_iter()
+        .find(|root| root.id() == workspace_id)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+fn query_path(query: Option<&str>) -> Option<String> {
+    let Some(query) = query else {
+        return Some(String::new());
+    };
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if key == "path" {
+            return percent_decode(value);
+        }
+    }
+    Some(String::new())
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' => {
+                let hex = bytes.get(index + 1..index + 3)?;
+                decoded.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+                index += 3;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 impl axum::extract::FromRef<AppState> for Store {

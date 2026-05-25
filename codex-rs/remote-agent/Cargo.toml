@@ -25,6 +25,7 @@ axum = { workspace = true, default-features = false, features = [
 base64 = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 constant_time_eq = { workspace = true }
+libc = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
