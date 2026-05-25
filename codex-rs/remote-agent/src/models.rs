@@ -50,10 +50,12 @@ pub struct SessionEvent {
 )]
 pub enum SessionEventKind {
     SessionCreated,
+    StatusText { status: String },
     MessageDelta { role: String, content: String },
     ToolCallStarted { command: String },
     ToolCallCompleted { exit_code: i32 },
     ApprovalRequested { approval_id: String },
+    ApprovalDecided { approval_id: String, approved: bool },
     DiffUpdated,
     ErrorRaised { message: String },
 }
