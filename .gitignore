@@ -53,6 +53,7 @@ yarn-error.log*
 .env*
 !.env.example
 .venv/
+.superpowers/
 
 # package
 *.tgz
