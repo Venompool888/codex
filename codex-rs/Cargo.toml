@@ -61,6 +61,7 @@ members = [
     "process-hardening",
     "protocol",
     "realtime-webrtc",
+    "remote-agent",
     "rollout",
     "rollout-trace",
     "rmcp-client",
@@ -182,6 +183,7 @@ codex-model-provider = { path = "model-provider" }
 codex-process-hardening = { path = "process-hardening" }
 codex-protocol = { path = "protocol" }
 codex-realtime-webrtc = { path = "realtime-webrtc" }
+codex-remote-agent = { path = "remote-agent" }
 codex-responses-api-proxy = { path = "responses-api-proxy" }
 codex-response-debug-context = { path = "response-debug-context" }
 codex-rmcp-client = { path = "rmcp-client" }
@@ -385,6 +387,7 @@ tokio-tungstenite = { version = "0.28.0", features = [
 tokio-util = "0.7.18"
 toml = "0.9.5"
 toml_edit = "0.24.0"
+tower = "0.5"
 tracing = "0.1.44"
 tracing-appender = "0.2.3"
 tracing-opentelemetry = "0.32.0"
