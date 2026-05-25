@@ -15,6 +15,9 @@ pub struct Cli {
 
     #[arg(long = "workspace")]
     pub workspaces: Vec<PathBuf>,
+
+    #[arg(long, env = "CODEX_REMOTE_SETUP_TOKEN")]
+    pub setup_token: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -22,6 +25,7 @@ pub struct Config {
     bind: SocketAddr,
     state_dir: PathBuf,
     workspaces: Vec<PathBuf>,
+    setup_token: Option<String>,
 }
 
 impl Config {
@@ -38,6 +42,7 @@ impl Config {
             bind: cli.bind,
             state_dir,
             workspaces: cli.workspaces,
+            setup_token: cli.setup_token,
         })
     }
 
@@ -51,5 +56,9 @@ impl Config {
 
     pub fn workspaces(&self) -> &[PathBuf] {
         &self.workspaces
+    }
+
+    pub fn setup_token(&self) -> Option<&str> {
+        self.setup_token.as_deref()
     }
 }

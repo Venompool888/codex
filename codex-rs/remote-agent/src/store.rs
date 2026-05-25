@@ -32,6 +32,14 @@ pub struct Store {
     mutex: Arc<Mutex<()>>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CompleteSetupError {
+    #[error("setup is already complete")]
+    AlreadyComplete,
+    #[error(transparent)]
+    Store(#[from] anyhow::Error),
+}
+
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionsFile {
@@ -77,6 +85,20 @@ impl Store {
     pub async fn save_setup_state(&self, state: &SetupState) -> anyhow::Result<()> {
         let _guard = self.mutex.lock().await;
         write_json(self.setup_state_path(), state).await
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "store operations intentionally serialize async file access"
+    )]
+    pub async fn complete_setup_once(&self, state: SetupState) -> Result<(), CompleteSetupError> {
+        let _guard = self.mutex.lock().await;
+        let existing: SetupState = read_json(self.setup_state_path()).await?;
+        if existing.setup_complete {
+            return Err(CompleteSetupError::AlreadyComplete);
+        }
+        write_json(self.setup_state_path(), &state).await?;
+        Ok(())
     }
 
     #[expect(
