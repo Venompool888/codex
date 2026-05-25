@@ -1,6 +1,6 @@
 mod auth;
 pub mod config;
-mod models;
+pub mod models;
 mod routes;
 mod sessions;
 mod static_ui;
