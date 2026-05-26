@@ -36,9 +36,10 @@ use crate::sessions::ApprovalDecision;
 use crate::sessions::ApproveError;
 use crate::sessions::SessionManager;
 use crate::store::CompleteSetupError;
+use crate::workspaces::WorkspaceConfigEntry;
 use crate::workspaces::WorkspaceRoot;
+use crate::workspaces::workspace_config_entries;
 use crate::workspaces::workspace_root_by_id;
-use crate::workspaces::workspace_roots;
 
 const MAX_SESSION_TITLE_CHARS: usize = 200;
 
@@ -192,20 +193,27 @@ async fn list_workspaces(
     _auth: Authenticated,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Workspace>>, StatusCode> {
-    let roots = workspace_roots(state.config.workspaces());
+    let entries = workspace_config_entries(state.config.workspaces());
     let sessions = state
         .store
         .sessions()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut workspaces = Vec::with_capacity(roots.len());
-    for root in &roots {
-        let last_session_id = sessions
-            .iter()
-            .filter(|session| session.workspace_id == root.id())
-            .max_by_key(|session| session.updated_at)
-            .map(|session| session.id.clone());
-        workspaces.push(root.to_workspace(last_session_id).await);
+    let mut workspaces = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        match entry {
+            WorkspaceConfigEntry::Available(root) => {
+                let last_session_id = sessions
+                    .iter()
+                    .filter(|session| root.matches_workspace_id(&session.workspace_id))
+                    .max_by_key(|session| session.updated_at)
+                    .map(|session| session.id.clone());
+                workspaces.push(root.to_workspace(last_session_id).await);
+            }
+            WorkspaceConfigEntry::Unavailable(workspace) => {
+                workspaces.push(workspace.to_workspace());
+            }
+        }
     }
 
     Ok(Json(workspaces))

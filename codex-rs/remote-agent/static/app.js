@@ -109,8 +109,14 @@ async function refreshData() {
     }
     state.workspaces = workspaces;
     state.sessions = sessions;
-    if (!state.selectedWorkspaceId && workspaces.length > 0) {
-      state.selectedWorkspaceId = workspaces[0].id;
+    if (
+      state.selectedWorkspaceId &&
+      !workspaceExists(state.selectedWorkspaceId)
+    ) {
+      state.selectedWorkspaceId = "";
+    }
+    if (!state.selectedWorkspaceId) {
+      state.selectedWorkspaceId = firstAvailableWorkspace()?.id || "";
     }
     const sorted = sortedSessions();
     const selectedSession =
@@ -123,7 +129,7 @@ async function refreshData() {
     renderSessions();
     renderComposerState();
     setConnection("Connected", "connected");
-    if (state.selectedWorkspaceId && workspaceExists(state.selectedWorkspaceId)) {
+    if (state.selectedWorkspaceId && workspaceAvailable(state.selectedWorkspaceId)) {
       await loadDiff(state.selectedWorkspaceId);
     } else if (state.selectedWorkspaceId) {
       renderMissingWorkspaceDiff(state.selectedWorkspaceId);
@@ -149,7 +155,7 @@ async function refreshData() {
 
 async function createSession() {
   const title = elements.sessionTitle.value.trim();
-  if (!title || !state.selectedWorkspaceId) {
+  if (!title || !workspaceAvailable(state.selectedWorkspaceId)) {
     return;
   }
 
@@ -186,6 +192,11 @@ async function loadDiff(workspaceId) {
   const token = state.token;
   const workspace = state.workspaces.find((item) => item.id === workspaceId);
   elements.diffSummary.textContent = workspace ? workspace.displayName : "No workspace selected";
+  if (workspace?.error) {
+    elements.diffPanel.classList.add("empty-state");
+    elements.diffPanel.textContent = workspace.error;
+    return false;
+  }
   elements.diffPanel.textContent = "Loading diff...";
 
   try {
@@ -219,7 +230,7 @@ async function selectSession(session) {
   renderWorkspaces();
   renderSessions();
   renderComposerState();
-  if (workspaceExists(session.workspaceId)) {
+  if (workspaceAvailable(session.workspaceId)) {
     await loadDiff(session.workspaceId);
   } else {
     renderMissingWorkspaceDiff(session.workspaceId);
@@ -235,6 +246,9 @@ async function selectSession(session) {
 }
 
 function selectWorkspace(workspaceId) {
+  if (!workspaceAvailable(workspaceId)) {
+    return;
+  }
   state.refreshGeneration++;
   state.selectedWorkspaceId = workspaceId;
   renderWorkspaces();
@@ -383,6 +397,7 @@ function renderWorkspaces() {
     ...state.workspaces.map((workspace) => {
       const item = document.createElement("button");
       item.type = "button";
+      item.disabled = Boolean(workspace.error);
       item.className = `item ${workspace.id === state.selectedWorkspaceId ? "active" : ""}`;
       item.addEventListener("click", () => {
         selectWorkspace(workspace.id);
@@ -397,10 +412,18 @@ function renderWorkspaces() {
         dirty.textContent = "dirty";
         title.append(dirty);
       }
+      if (workspace.error) {
+        const error = document.createElement("span");
+        error.className = "status-pill failed";
+        error.textContent = "error";
+        title.append(error);
+      }
 
       const meta = document.createElement("div");
       meta.className = "item-meta";
-      meta.textContent = [workspace.branch, workspace.path].filter(Boolean).join(" - ");
+      meta.textContent = [workspace.branch, workspace.path, workspace.error]
+        .filter(Boolean)
+        .join(" - ");
       item.append(title, meta);
       return item;
     }),
@@ -667,7 +690,7 @@ function refreshSessionDiff(sessionId) {
     return;
   }
   const workspaceId = selectedSessionWorkspaceId();
-  if (workspaceId && workspaceId === state.selectedWorkspaceId && workspaceExists(workspaceId)) {
+  if (workspaceId && workspaceId === state.selectedWorkspaceId && workspaceAvailable(workspaceId)) {
     loadDiff(workspaceId);
   } else if (workspaceId) {
     return;
@@ -700,6 +723,14 @@ function selectedSessionWorkspaceId() {
 
 function workspaceExists(workspaceId) {
   return state.workspaces.some((workspace) => workspace.id === workspaceId);
+}
+
+function workspaceAvailable(workspaceId) {
+  return state.workspaces.some((workspace) => workspace.id === workspaceId && !workspace.error);
+}
+
+function firstAvailableWorkspace() {
+  return state.workspaces.find((workspace) => !workspace.error);
 }
 
 function renderMissingWorkspaceDiff(workspaceId) {

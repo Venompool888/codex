@@ -10,6 +10,7 @@ pub struct Workspace {
     pub branch: Option<String>,
     pub dirty: bool,
     pub last_session_id: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -127,6 +128,7 @@ mod tests {
             branch: Some("main".to_string()),
             dirty: true,
             last_session_id: Some("session-1".to_string()),
+            error: None,
         };
 
         let value = serde_json::to_value(workspace).unwrap();
@@ -139,7 +141,8 @@ mod tests {
                 "path": "/srv/app",
                 "branch": "main",
                 "dirty": true,
-                "lastSessionId": "session-1"
+                "lastSessionId": "session-1",
+                "error": null
             })
         );
     }

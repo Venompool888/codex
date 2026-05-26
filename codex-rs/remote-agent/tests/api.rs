@@ -1135,13 +1135,14 @@ async fn workspace_list_returns_configured_workspace_after_setup() {
             "path": repo.canonicalize().unwrap().to_string_lossy(),
             "branch": null,
             "dirty": false,
-            "lastSessionId": null
+            "lastSessionId": null,
+            "error": null
         }])
     );
 }
 
 #[tokio::test]
-async fn workspace_list_skips_missing_workspace_and_keeps_healthy_workspace_accessible() {
+async fn workspace_list_reports_missing_workspace_and_keeps_healthy_workspace_accessible() {
     let temp_dir = TempDir::new().unwrap();
     let missing_repo = temp_dir.path().join("missing");
     let repo = temp_dir.path().join("repo");
@@ -1151,7 +1152,7 @@ async fn workspace_list_skips_missing_workspace_and_keeps_healthy_workspace_acce
         .unwrap();
     let app = test_app_with_workspaces(
         temp_dir.path().join("state"),
-        vec![missing_repo, repo.clone()],
+        vec![missing_repo.clone(), repo.clone()],
     )
     .await;
     let session_token = setup_and_extract_token(app.clone()).await;
@@ -1160,17 +1161,36 @@ async fn workspace_list_skips_missing_workspace_and_keeps_healthy_workspace_acce
 
     assert_eq!(response.status(), StatusCode::OK);
     let body_json = response_json(response).await;
-    let workspace_id = body_json[0]["id"].as_str().unwrap();
+    assert_eq!(body_json.as_array().unwrap().len(), 2);
+    let missing_workspace = &body_json[0];
+    assert_eq!(missing_workspace["id"], "workspace-1");
+    assert_eq!(missing_workspace["displayName"], "missing");
     assert_eq!(
-        body_json,
-        json!([{
+        missing_workspace["path"],
+        missing_repo.to_string_lossy().to_string()
+    );
+    assert_eq!(missing_workspace["branch"], serde_json::Value::Null);
+    assert_eq!(missing_workspace["dirty"], false);
+    assert_eq!(missing_workspace["lastSessionId"], serde_json::Value::Null);
+    assert!(
+        missing_workspace["error"]
+            .as_str()
+            .unwrap()
+            .contains("failed to canonicalize workspace root")
+    );
+
+    let workspace_id = body_json[1]["id"].as_str().unwrap();
+    assert_eq!(
+        body_json[1],
+        json!({
             "id": workspace_id,
             "displayName": "repo",
             "path": repo.canonicalize().unwrap().to_string_lossy(),
             "branch": null,
             "dirty": false,
-            "lastSessionId": null
-        }])
+            "lastSessionId": null,
+            "error": null
+        })
     );
 
     let response = get_with_token(
@@ -1499,9 +1519,48 @@ async fn workspace_list_includes_last_session_id_from_store() {
             "path": repo.canonicalize().unwrap().to_string_lossy(),
             "branch": null,
             "dirty": false,
-            "lastSessionId": "session-1"
+            "lastSessionId": "session-1",
+            "error": null
         }])
     );
+}
+
+#[tokio::test]
+async fn workspace_list_maps_legacy_alias_session_to_stable_workspace_after_reordering() {
+    let temp_dir = TempDir::new().unwrap();
+    let first_repo = temp_dir.path().join("first");
+    let second_repo = temp_dir.path().join("second");
+    let state_dir = temp_dir.path().join("state");
+    tokio::fs::create_dir_all(&first_repo).await.unwrap();
+    tokio::fs::create_dir_all(&second_repo).await.unwrap();
+    Store::new(state_dir.clone())
+        .unwrap()
+        .upsert_session(Session {
+            id: "legacy-session".to_string(),
+            workspace_id: "workspace-2".to_string(),
+            title: "Existing legacy session".to_string(),
+            status: SessionStatus::Running,
+            created_at: 10,
+            updated_at: 20,
+        })
+        .await
+        .unwrap();
+    let app = test_app_with_workspaces(state_dir, vec![second_repo, first_repo]).await;
+    let session_token = setup_and_extract_token(app.clone()).await;
+
+    let response = get_with_token(app, "/api/workspaces", &session_token).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_json = response_json(response).await;
+    let first_workspace = body_json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["displayName"] == "first")
+        .unwrap();
+    assert_ne!(first_workspace["id"], "workspace-2");
+    assert_eq!(first_workspace["lastSessionId"], "legacy-session");
+    assert_eq!(first_workspace["error"], serde_json::Value::Null);
 }
 
 #[tokio::test]

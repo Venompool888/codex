@@ -19,6 +19,7 @@ const WORKSPACE_ID_HASH_BYTES: usize = 8;
 #[derive(Clone, Debug)]
 pub(crate) struct WorkspaceRoot {
     id: String,
+    legacy_id: String,
     root: PathBuf,
 }
 
@@ -28,21 +29,30 @@ impl WorkspaceRoot {
         let root = root
             .canonicalize()
             .with_context(|| format!("failed to canonicalize workspace root {}", root.display()))?;
-        Ok(Self { id, root })
+        Ok(Self {
+            id,
+            legacy_id: "workspace-1".to_string(),
+            root,
+        })
     }
 
-    pub(crate) fn from_config_entry(root: PathBuf) -> anyhow::Result<Self> {
+    pub(crate) fn from_config_entry(index: usize, root: PathBuf) -> anyhow::Result<Self> {
         let root = root
             .canonicalize()
             .with_context(|| format!("failed to canonicalize workspace root {}", root.display()))?;
         Ok(Self {
             id: stable_workspace_id(&root),
+            legacy_id: legacy_workspace_id(index),
             root,
         })
     }
 
     pub(crate) fn id(&self) -> &str {
         &self.id
+    }
+
+    pub(crate) fn matches_workspace_id(&self, workspace_id: &str) -> bool {
+        workspace_id == self.id || workspace_id == self.legacy_id
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -61,6 +71,7 @@ impl WorkspaceRoot {
             branch: current_branch(&self.root).await.ok(),
             dirty: is_dirty(&self.root).await.unwrap_or(false),
             last_session_id,
+            error: None,
         }
     }
 
@@ -189,10 +200,66 @@ fn open_file_no_follow(path: &Path) -> anyhow::Result<std::fs::File> {
         .with_context(|| format!("failed to open file {}", path.display()))
 }
 
+pub(crate) struct UnavailableWorkspace {
+    id: String,
+    path: PathBuf,
+    error: String,
+}
+
+impl UnavailableWorkspace {
+    fn new(index: usize, path: PathBuf, error: anyhow::Error) -> Self {
+        Self {
+            id: legacy_workspace_id(index),
+            path,
+            error: error.to_string(),
+        }
+    }
+
+    pub(crate) fn to_workspace(&self) -> Workspace {
+        Workspace {
+            id: self.id.clone(),
+            display_name: self
+                .path
+                .file_name()
+                .map(|file_name| file_name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.path.display().to_string()),
+            path: self.path.display().to_string(),
+            branch: None,
+            dirty: false,
+            last_session_id: None,
+            error: Some(self.error.clone()),
+        }
+    }
+}
+
+pub(crate) enum WorkspaceConfigEntry {
+    Available(WorkspaceRoot),
+    Unavailable(UnavailableWorkspace),
+}
+
+#[cfg(test)]
 pub(crate) fn workspace_roots(paths: &[PathBuf]) -> Vec<WorkspaceRoot> {
     paths
         .iter()
-        .filter_map(|path| WorkspaceRoot::from_config_entry(path.clone()).ok())
+        .enumerate()
+        .filter_map(|(index, path)| WorkspaceRoot::from_config_entry(index, path.clone()).ok())
+        .collect()
+}
+
+pub(crate) fn workspace_config_entries(paths: &[PathBuf]) -> Vec<WorkspaceConfigEntry> {
+    paths
+        .iter()
+        .enumerate()
+        .map(
+            |(index, path)| match WorkspaceRoot::from_config_entry(index, path.clone()) {
+                Ok(root) => WorkspaceConfigEntry::Available(root),
+                Err(error) => WorkspaceConfigEntry::Unavailable(UnavailableWorkspace::new(
+                    index,
+                    path.clone(),
+                    error,
+                )),
+            },
+        )
         .collect()
 }
 
@@ -204,14 +271,13 @@ pub(crate) fn workspace_root_by_id(
         if !workspace_id_matches_entry(index, path, workspace_id) {
             continue;
         }
-        return WorkspaceRoot::from_config_entry(path.clone()).map(Some);
+        return WorkspaceRoot::from_config_entry(index, path.clone()).map(Some);
     }
     Ok(None)
 }
 
 fn workspace_id_matches_entry(index: usize, path: &Path, workspace_id: &str) -> bool {
-    let legacy_index = index + 1;
-    if workspace_id == format!("workspace-{legacy_index}") {
+    if workspace_id == legacy_workspace_id(index) {
         return true;
     }
 
@@ -219,6 +285,11 @@ fn workspace_id_matches_entry(index: usize, path: &Path, workspace_id: &str) -> 
         return false;
     };
     workspace_id == stable_workspace_id(&canonical)
+}
+
+fn legacy_workspace_id(index: usize) -> String {
+    let legacy_index = index + 1;
+    format!("workspace-{legacy_index}")
 }
 
 fn stable_workspace_id(path: &Path) -> String {
