@@ -139,6 +139,22 @@ async fn create_session(app: Router, token: &str) -> serde_json::Value {
     response_json(response).await
 }
 
+async fn create_session_for_workspace(
+    app: Router,
+    token: &str,
+    workspace_id: &str,
+) -> serde_json::Value {
+    let response = post_json_with_token(
+        app.clone(),
+        "/api/sessions",
+        token,
+        json!({"workspaceId":workspace_id,"title":"Build feature"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response_json(response).await
+}
+
 async fn session_test_app(temp_dir: &TempDir) -> Router {
     let repo = temp_dir.path().join("repo");
     tokio::fs::create_dir_all(&repo)
@@ -586,6 +602,10 @@ async fn create_session_returns_waiting_for_approval_session() {
     tokio::fs::create_dir_all(&repo).await.unwrap();
     let app = test_app_with_workspaces(temp_dir.path().join("state"), vec![repo]).await;
     let session_token = setup_and_extract_token(app.clone()).await;
+    let response = get_with_token(app.clone(), "/api/workspaces", &session_token).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let workspaces = response_json(response).await;
+    let workspace_id = workspaces[0]["id"].as_str().unwrap();
 
     let response = create_session_with_body(
         app.clone(),
@@ -596,10 +616,34 @@ async fn create_session_returns_waiting_for_approval_session() {
     assert_eq!(response.status(), StatusCode::OK);
     let body_json = response_json(response).await;
 
-    assert_eq!(body_json["workspaceId"], "workspace-1");
+    assert_eq!(body_json["workspaceId"], workspace_id);
     assert_eq!(body_json["title"], "Build feature");
     assert_eq!(body_json["status"], "waitingForApproval");
     assert!(body_json["id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn create_session_accepts_legacy_workspace_alias() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = temp_dir.path().join("repo");
+    tokio::fs::create_dir_all(&repo).await.unwrap();
+    let app = test_app_with_workspaces(temp_dir.path().join("state"), vec![repo]).await;
+    let session_token = setup_and_extract_token(app.clone()).await;
+    let response = get_with_token(app.clone(), "/api/workspaces", &session_token).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let workspaces = response_json(response).await;
+    let workspace_id = workspaces[0]["id"].as_str().unwrap();
+
+    let response = create_session_with_body(
+        app.clone(),
+        &session_token,
+        json!({"workspaceId":"workspace-1","title":"Build feature"}),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_json = response_json(response).await;
+    assert_eq!(body_json["workspaceId"], workspace_id);
 }
 
 #[tokio::test]
@@ -1080,10 +1124,13 @@ async fn workspace_list_returns_configured_workspace_after_setup() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body_json = response_json(response).await;
+    let workspace_id = body_json[0]["id"].as_str().unwrap();
+    assert!(workspace_id.starts_with("workspace-"));
+    assert_ne!(workspace_id, "workspace-1");
     assert_eq!(
         body_json,
         json!([{
-            "id": "workspace-1",
+            "id": workspace_id,
             "displayName": "repo",
             "path": repo.canonicalize().unwrap().to_string_lossy(),
             "branch": null,
@@ -1091,6 +1138,49 @@ async fn workspace_list_returns_configured_workspace_after_setup() {
             "lastSessionId": null
         }])
     );
+}
+
+#[tokio::test]
+async fn workspace_list_skips_missing_workspace_and_keeps_healthy_workspace_accessible() {
+    let temp_dir = TempDir::new().unwrap();
+    let missing_repo = temp_dir.path().join("missing");
+    let repo = temp_dir.path().join("repo");
+    tokio::fs::create_dir_all(&repo).await.unwrap();
+    tokio::fs::write(repo.join("README.md"), "hello")
+        .await
+        .unwrap();
+    let app = test_app_with_workspaces(
+        temp_dir.path().join("state"),
+        vec![missing_repo, repo.clone()],
+    )
+    .await;
+    let session_token = setup_and_extract_token(app.clone()).await;
+
+    let response = get_with_token(app.clone(), "/api/workspaces", &session_token).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_json = response_json(response).await;
+    let workspace_id = body_json[0]["id"].as_str().unwrap();
+    assert_eq!(
+        body_json,
+        json!([{
+            "id": workspace_id,
+            "displayName": "repo",
+            "path": repo.canonicalize().unwrap().to_string_lossy(),
+            "branch": null,
+            "dirty": false,
+            "lastSessionId": null
+        }])
+    );
+
+    let response = get_with_token(
+        app,
+        &format!("/api/workspaces/{workspace_id}/files"),
+        &session_token,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1377,11 +1467,18 @@ async fn workspace_list_includes_last_session_id_from_store() {
     let repo = temp_dir.path().join("repo");
     let state_dir = temp_dir.path().join("state");
     tokio::fs::create_dir_all(&repo).await.unwrap();
+    let app = test_app_with_workspaces(state_dir.clone(), vec![repo.clone()]).await;
+    let session_token = setup_and_extract_token(app.clone()).await;
+    let response = get_with_token(app.clone(), "/api/workspaces", &session_token).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_json = response_json(response).await;
+    let workspace_id = body_json[0]["id"].as_str().unwrap().to_string();
+
     Store::new(state_dir.clone())
         .unwrap()
         .upsert_session(Session {
             id: "session-1".to_string(),
-            workspace_id: "workspace-1".to_string(),
+            workspace_id: workspace_id.clone(),
             title: "Existing session".to_string(),
             status: SessionStatus::Running,
             created_at: 10,
@@ -1389,8 +1486,6 @@ async fn workspace_list_includes_last_session_id_from_store() {
         })
         .await
         .unwrap();
-    let app = test_app_with_workspaces(state_dir, vec![repo.clone()]).await;
-    let session_token = setup_and_extract_token(app.clone()).await;
 
     let response = get_with_token(app, "/api/workspaces", &session_token).await;
 
@@ -1399,7 +1494,7 @@ async fn workspace_list_includes_last_session_id_from_store() {
     assert_eq!(
         body_json,
         json!([{
-            "id": "workspace-1",
+            "id": workspace_id,
             "displayName": "repo",
             "path": repo.canonicalize().unwrap().to_string_lossy(),
             "branch": null,
@@ -1407,6 +1502,49 @@ async fn workspace_list_includes_last_session_id_from_store() {
             "lastSessionId": "session-1"
         }])
     );
+}
+
+#[tokio::test]
+async fn persisted_session_stays_with_same_workspace_after_reordering() {
+    let temp_dir = TempDir::new().unwrap();
+    let first_repo = temp_dir.path().join("first");
+    let second_repo = temp_dir.path().join("second");
+    let state_dir = temp_dir.path().join("state");
+    tokio::fs::create_dir_all(&first_repo).await.unwrap();
+    tokio::fs::create_dir_all(&second_repo).await.unwrap();
+    let app = test_app_with_workspaces(
+        state_dir.clone(),
+        vec![first_repo.clone(), second_repo.clone()],
+    )
+    .await;
+    let session_token = setup_and_extract_token(app.clone()).await;
+    let response = get_with_token(app.clone(), "/api/workspaces", &session_token).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let workspaces = response_json(response).await;
+    let second_workspace_id = workspaces
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["displayName"] == "second")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let session = create_session_for_workspace(app, &session_token, &second_workspace_id).await;
+
+    let app = test_app_with_workspaces(state_dir, vec![second_repo, first_repo]).await;
+    let response = get_with_token(app, "/api/workspaces", &session_token).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let workspaces = response_json(response).await;
+    let second_workspace = workspaces
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["displayName"] == "second")
+        .unwrap();
+    assert_eq!(second_workspace["id"], second_workspace_id);
+    assert_eq!(second_workspace["lastSessionId"], session["id"]);
 }
 
 #[tokio::test]

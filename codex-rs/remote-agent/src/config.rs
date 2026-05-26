@@ -2,8 +2,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 
-use anyhow::Context;
 use clap::Parser;
+
+use crate::store::ensure_private_state_dir;
 
 #[derive(Debug, Parser)]
 pub struct Cli {
@@ -34,9 +35,7 @@ impl Config {
             Some(path) => path,
             None => std::env::current_dir()?.join(".codex-remote-agent"),
         };
-        tokio::fs::create_dir_all(&state_dir)
-            .await
-            .with_context(|| format!("failed to create {}", state_dir.display()))?;
+        ensure_private_state_dir(&state_dir)?;
 
         Ok(Self {
             bind: cli.bind,
@@ -60,5 +59,38 @@ impl Config {
 
     pub fn setup_token(&self) -> Option<&str> {
         self.setup_token.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use super::*;
+    use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn from_cli_sets_state_directory_permissions_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let state_dir = temp_dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        Config::from_cli(Cli {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            state_dir: Some(state_dir.clone()),
+            workspaces: Vec::new(),
+            setup_token: Some("setup-secret".to_string()),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::metadata(state_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 }

@@ -10,7 +10,7 @@ It serves a browser UI and local APIs for controlling Codex-style sessions on a 
 cd codex-rs
 cargo run -p codex-remote-agent -- \
   --bind 127.0.0.1:7680 \
-  --state-dir /tmp/codex-remote-agent \
+  --state-dir "$HOME/.local/state/codex-remote-agent" \
   --workspace /path/to/repo \
   --setup-token change-me
 ```
@@ -19,7 +19,7 @@ Open `http://127.0.0.1:7680` and enter the setup token.
 
 ## Tailscale
 
-For personal remote access, bind to the server's Tailscale IP or to `0.0.0.0` only when protected by tailnet ACLs or a trusted reverse proxy:
+For personal remote access, bind to the server's Tailscale IP:
 
 ```bash
 cargo run -p codex-remote-agent -- \
@@ -29,7 +29,11 @@ cargo run -p codex-remote-agent -- \
   --setup-token "$(openssl rand -base64 32)"
 ```
 
+Use `0.0.0.0` only with host firewall/interface restrictions or a trusted reverse proxy. Tailnet ACLs alone do not protect non-Tailscale interfaces exposed by wildcard binding.
+
 The default bind is `127.0.0.1:7680` to avoid accidentally exposing command execution APIs.
+
+For service-style installs, use a private state directory such as `/var/lib/codex-remote-agent` owned by the service user.
 
 ## MVP Limits
 

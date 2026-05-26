@@ -9,7 +9,6 @@ use anyhow::Context;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use crate::models::ApprovalRequest;
@@ -83,8 +82,7 @@ struct AgentStateFile {
 
 impl Store {
     pub fn new(state_dir: PathBuf) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(&state_dir)
-            .with_context(|| format!("failed to create state directory {}", state_dir.display()))?;
+        ensure_private_state_dir(&state_dir)?;
 
         Ok(Self {
             state_dir,
@@ -116,6 +114,7 @@ impl Store {
     )]
     pub async fn complete_setup_once(&self, state: SetupState) -> Result<(), CompleteSetupError> {
         let _guard = self.mutex.lock().await;
+        let _file_guard = self.lock_setup_state().await?;
         let existing: SetupState = read_json(self.setup_state_path()).await?;
         if existing.setup_complete {
             return Err(CompleteSetupError::AlreadyComplete);
@@ -327,6 +326,10 @@ impl Store {
         FileLockGuard::lock(self.state_dir.join(".state.lock")).await
     }
 
+    async fn lock_setup_state(&self) -> anyhow::Result<FileLockGuard> {
+        FileLockGuard::lock(self.state_dir.join(".setup.lock")).await
+    }
+
     fn setup_state_path(&self) -> PathBuf {
         self.state_dir.join("setup_state.json")
     }
@@ -354,13 +357,18 @@ struct FileLockGuard {
 
 impl FileLockGuard {
     async fn lock(path: PathBuf) -> anyhow::Result<Self> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.mode(0o600);
+        }
+        let file = options
             .open(&path)
             .with_context(|| format!("failed to open lock file {}", path.display()))?;
+        set_private_file_permissions(&path)?;
         for _ in 0..LOCK_RETRY_COUNT {
             match file.try_lock() {
                 Ok(()) => return Ok(Self { file }),
@@ -386,6 +394,60 @@ impl Drop for FileLockGuard {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
+}
+
+pub(crate) fn ensure_private_state_dir(state_dir: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("failed to create state directory {}", state_dir.display()))?;
+    set_private_dir_permissions(state_dir)
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("failed to inspect state directory {}", path.display()))?;
+    if !metadata.is_dir() {
+        anyhow::bail!("state path is not a directory {}", path.display());
+    }
+    let permissions = metadata.permissions();
+    if permissions.mode() & 0o777 == 0o700 {
+        return Ok(());
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).with_context(|| {
+        format!(
+            "failed to set state directory permissions {}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("failed to inspect state file {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("state path is not a file {}", path.display());
+    }
+    let permissions = metadata.permissions();
+    if permissions.mode() & 0o777 == 0o600 {
+        return Ok(());
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to set state file permissions {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
 }
 
 async fn read_json<T>(path: PathBuf) -> anyhow::Result<T>
@@ -436,9 +498,9 @@ where
         .file_name()
         .with_context(|| format!("JSON file path has no file name {}", path.display()))?
         .to_string_lossy();
-    let (temp_path, mut file) = create_unique_temp_file(parent, &file_name).await?;
+    let (temp_path, mut file) = create_unique_temp_file(parent, &file_name)?;
 
-    if let Err(error) = file.write_all(&bytes).await {
+    if let Err(error) = std::io::Write::write_all(&mut file, &bytes) {
         drop(file);
         cleanup_temp_file(&temp_path).await;
         return Err(error).with_context(|| {
@@ -449,7 +511,7 @@ where
         });
     }
 
-    if let Err(error) = file.sync_all().await {
+    if let Err(error) = file.sync_all() {
         drop(file);
         cleanup_temp_file(&temp_path).await;
         return Err(error).with_context(|| {
@@ -466,20 +528,23 @@ where
     sync_parent_dir(parent).await
 }
 
-async fn create_unique_temp_file(
+fn create_unique_temp_file(
     parent: &Path,
     file_name: &str,
-) -> anyhow::Result<(PathBuf, tokio::fs::File)> {
+) -> anyhow::Result<(PathBuf, std::fs::File)> {
     let pid = std::process::id();
     loop {
         let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let temp_path = parent.join(format!(".{file_name}.{pid}.{counter}.tmp"));
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .await
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.mode(0o600);
+        }
+        match options.open(&temp_path) {
             Ok(file) => return Ok((temp_path, file)),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => {
@@ -597,6 +662,95 @@ mod tests {
         store.save_setup_state(&state).await.unwrap();
 
         assert_eq!(store.setup_state().await.unwrap(), state);
+    }
+
+    #[tokio::test]
+    async fn concurrent_independent_stores_allow_one_setup_completion() {
+        let temp_dir = TempDir::new().unwrap();
+        let first_store = Store::new(temp_dir.path().to_path_buf()).unwrap();
+        let second_store = Store::new(temp_dir.path().to_path_buf()).unwrap();
+
+        let (first, second) = tokio::join!(
+            first_store.complete_setup_once(SetupState {
+                setup_complete: true,
+                setup_token_hash: "setup-hash".to_string(),
+                session_token_hash: Some("first-session-hash".to_string()),
+            }),
+            second_store.complete_setup_once(SetupState {
+                setup_complete: true,
+                setup_token_hash: "setup-hash".to_string(),
+                session_token_hash: Some("second-session-hash".to_string()),
+            })
+        );
+        let results = [first, second];
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(CompleteSetupError::AlreadyComplete)))
+                .count(),
+            1
+        );
+        assert!(
+            Store::new(temp_dir.path().to_path_buf())
+                .unwrap()
+                .setup_state()
+                .await
+                .unwrap()
+                .setup_complete
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_sets_state_directory_permissions_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let state_dir = temp_dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        Store::new(state_dir.clone()).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(state_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn state_files_and_locks_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = Store::new(temp_dir.path().to_path_buf()).unwrap();
+
+        store
+            .complete_setup_once(SetupState {
+                setup_complete: true,
+                setup_token_hash: "setup-hash".to_string(),
+                session_token_hash: Some("session-hash".to_string()),
+            })
+            .await
+            .unwrap();
+        store.upsert_session(test_session()).await.unwrap();
+
+        for path in [
+            store.setup_state_path(),
+            store.agent_state_path(),
+            store.state_dir.join(".setup.lock"),
+            store.state_dir.join(".state.lock"),
+        ] {
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "{}",
+                path.display()
+            );
+        }
     }
 
     #[tokio::test]

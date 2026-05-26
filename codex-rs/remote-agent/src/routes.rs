@@ -37,6 +37,7 @@ use crate::sessions::ApproveError;
 use crate::sessions::SessionManager;
 use crate::store::CompleteSetupError;
 use crate::workspaces::WorkspaceRoot;
+use crate::workspaces::workspace_root_by_id;
 use crate::workspaces::workspace_roots;
 
 const MAX_SESSION_TITLE_CHARS: usize = 200;
@@ -191,7 +192,7 @@ async fn list_workspaces(
     _auth: Authenticated,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Workspace>>, StatusCode> {
-    let roots = workspace_roots(state.config.workspaces()).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let roots = workspace_roots(state.config.workspaces());
     let sessions = state
         .store
         .sessions()
@@ -227,7 +228,7 @@ async fn create_session(
     State(state): State<AppState>,
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<Json<Session>, StatusCode> {
-    workspace_by_id(&state, &request.workspace_id)?;
+    let root = workspace_by_id(&state, &request.workspace_id)?;
     let title = request.title.trim();
     if title.is_empty() || title.chars().count() > MAX_SESSION_TITLE_CHARS {
         return Err(StatusCode::BAD_REQUEST);
@@ -235,7 +236,7 @@ async fn create_session(
 
     state
         .sessions
-        .start_session(request.workspace_id, title.to_string())
+        .start_session(root.id().to_string(), title.to_string())
         .await
         .map(Json)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -426,10 +427,8 @@ async fn workspace_diff_summary(
 }
 
 fn workspace_by_id(state: &AppState, workspace_id: &str) -> Result<WorkspaceRoot, StatusCode> {
-    workspace_roots(state.config.workspaces())
+    workspace_root_by_id(state.config.workspaces(), workspace_id)
         .map_err(|_| StatusCode::BAD_REQUEST)?
-        .into_iter()
-        .find(|root| root.id() == workspace_id)
         .ok_or(StatusCode::NOT_FOUND)
 }
 

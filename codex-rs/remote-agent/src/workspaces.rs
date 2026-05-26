@@ -14,6 +14,7 @@ use crate::models::Workspace;
 
 const MAX_FILE_ENTRIES: usize = 1_000;
 const MAX_FILE_READ_BYTES: u64 = 1_000_000;
+const WORKSPACE_ID_HASH_BYTES: usize = 8;
 
 #[derive(Clone, Debug)]
 pub(crate) struct WorkspaceRoot {
@@ -22,11 +23,22 @@ pub(crate) struct WorkspaceRoot {
 }
 
 impl WorkspaceRoot {
+    #[cfg(test)]
     pub(crate) fn new(id: String, root: PathBuf) -> anyhow::Result<Self> {
         let root = root
             .canonicalize()
             .with_context(|| format!("failed to canonicalize workspace root {}", root.display()))?;
         Ok(Self { id, root })
+    }
+
+    pub(crate) fn from_config_entry(root: PathBuf) -> anyhow::Result<Self> {
+        let root = root
+            .canonicalize()
+            .with_context(|| format!("failed to canonicalize workspace root {}", root.display()))?;
+        Ok(Self {
+            id: stable_workspace_id(&root),
+            root,
+        })
     }
 
     pub(crate) fn id(&self) -> &str {
@@ -177,12 +189,46 @@ fn open_file_no_follow(path: &Path) -> anyhow::Result<std::fs::File> {
         .with_context(|| format!("failed to open file {}", path.display()))
 }
 
-pub(crate) fn workspace_roots(paths: &[PathBuf]) -> anyhow::Result<Vec<WorkspaceRoot>> {
+pub(crate) fn workspace_roots(paths: &[PathBuf]) -> Vec<WorkspaceRoot> {
     paths
         .iter()
-        .enumerate()
-        .map(|(index, path)| WorkspaceRoot::new(format!("workspace-{}", index + 1), path.clone()))
+        .filter_map(|path| WorkspaceRoot::from_config_entry(path.clone()).ok())
         .collect()
+}
+
+pub(crate) fn workspace_root_by_id(
+    paths: &[PathBuf],
+    workspace_id: &str,
+) -> anyhow::Result<Option<WorkspaceRoot>> {
+    for (index, path) in paths.iter().enumerate() {
+        if !workspace_id_matches_entry(index, path, workspace_id) {
+            continue;
+        }
+        return WorkspaceRoot::from_config_entry(path.clone()).map(Some);
+    }
+    Ok(None)
+}
+
+fn workspace_id_matches_entry(index: usize, path: &Path, workspace_id: &str) -> bool {
+    let legacy_index = index + 1;
+    if workspace_id == format!("workspace-{legacy_index}") {
+        return true;
+    }
+
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    workspace_id == stable_workspace_id(&canonical)
+}
+
+fn stable_workspace_id(path: &Path) -> String {
+    use base64::Engine;
+    use sha2::Digest;
+
+    let digest = sha2::Sha256::digest(path.to_string_lossy().as_bytes());
+    let suffix =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..WORKSPACE_ID_HASH_BYTES]);
+    format!("workspace-{suffix}")
 }
 
 fn ensure_workspace_path(root: &Path, path: PathBuf) -> anyhow::Result<PathBuf> {
@@ -340,6 +386,42 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn workspace_roots_use_stable_ids_when_cli_order_changes() {
+        let temp_dir = TempDir::new().unwrap();
+        let first_workspace = temp_dir.path().join("first");
+        let second_workspace = temp_dir.path().join("second");
+        fs::create_dir_all(&first_workspace).unwrap();
+        fs::create_dir_all(&second_workspace).unwrap();
+
+        let original = workspace_roots(&[first_workspace.clone(), second_workspace.clone()])
+            .into_iter()
+            .map(|root| (root.root().to_path_buf(), root.id().to_string()))
+            .collect::<Vec<_>>();
+        let reordered = workspace_roots(&[second_workspace, first_workspace])
+            .into_iter()
+            .map(|root| (root.root().to_path_buf(), root.id().to_string()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(original[0], reordered[1]);
+        assert_eq!(original[1], reordered[0]);
+        assert_ne!(original[0].1, "workspace-1");
+        assert_ne!(original[1].1, "workspace-2");
+    }
+
+    #[tokio::test]
+    async fn workspace_roots_skip_bad_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace_dir = temp_dir.path().join("workspace");
+        let missing_dir = temp_dir.path().join("missing");
+        fs::create_dir_all(&workspace_dir).unwrap();
+
+        let roots = workspace_roots(&[missing_dir, workspace_dir.clone()]);
+
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].root(), workspace_dir.canonicalize().unwrap());
+    }
 
     #[tokio::test]
     async fn rejects_path_traversal_outside_workspace() {
