@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Codex Remote</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Codex Remote</p>
+          <h1>Remote Agent</h1>
+        </div>
+        <div class="connection" id="connectionStatus">Signed out</div>
+      </header>
+
+      <main class="workspace-grid">
+        <section class="panel auth-panel" id="authPanel">
+          <div class="panel-heading">
+            <h2>Setup</h2>
+          </div>
+          <form id="setupForm" class="stack">
+            <label for="setupToken">Setup token</label>
+            <div class="inline-field">
+              <input id="setupToken" name="setupToken" type="password" autocomplete="one-time-code" required>
+              <button type="submit">Connect</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Workspaces</h2>
+            <button type="button" id="refreshButton">Refresh</button>
+          </div>
+          <div id="workspaceList" class="list empty-state">No workspaces loaded.</div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Sessions</h2>
+          </div>
+          <form id="sessionForm" class="stack">
+            <label for="sessionTitle">New session</label>
+            <div class="inline-field">
+              <input id="sessionTitle" name="sessionTitle" type="text" maxlength="200" placeholder="Task title" required>
+              <button type="submit">Start</button>
+            </div>
+          </form>
+          <div id="sessionList" class="list empty-state">No sessions yet.</div>
+        </section>
+
+        <section class="panel detail-panel">
+          <div class="panel-heading">
+            <h2>Session Events</h2>
+            <span id="activeSessionLabel" class="muted">No session selected</span>
+          </div>
+          <div id="eventStream" class="event-stream empty-state">Select a session to stream events.</div>
+          <form id="messageForm" class="message-form" aria-label="Message composer">
+            <input id="messageInput" name="message" type="text" placeholder="Message selected session" disabled>
+            <button id="messageSend" type="submit" disabled>Send</button>
+          </form>
+        </section>
+
+        <section class="panel detail-panel">
+          <div class="panel-heading">
+            <h2>Diff</h2>
+            <span id="diffSummary" class="muted">No workspace selected</span>
+          </div>
+          <div id="diffPanel" class="diff-panel empty-state">Diff summary will appear here.</div>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

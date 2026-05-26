@@ -7,6 +7,11 @@ use axum::body::Body;
 use axum::body::to_bytes;
 use axum::http::Request;
 use axum::http::StatusCode;
+use axum::http::header::CONTENT_SECURITY_POLICY;
+use axum::http::header::CONTENT_TYPE;
+use axum::http::header::REFERRER_POLICY;
+use axum::http::header::X_CONTENT_TYPE_OPTIONS;
+use axum::response::Response;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -162,6 +167,98 @@ async fn run_git(repo: &Path, args: &[&str]) {
         output.status.success(),
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn serves_embedded_web_ui() {
+    let temp_dir = TempDir::new().unwrap();
+    let app = test_app(&temp_dir).await;
+
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE).unwrap(),
+        "text/html; charset=utf-8"
+    );
+    assert_static_security_headers(&response);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains(r#"/assets/styles.css"#));
+    assert!(body.contains(r#"/assets/app.js"#));
+    assert!(body.contains(r#"id="messageForm""#));
+    assert!(body.contains(r#"id="messageInput""#));
+    assert!(body.contains(r#"id="messageSend""#));
+}
+
+#[tokio::test]
+async fn serves_embedded_web_ui_assets() {
+    let temp_dir = TempDir::new().unwrap();
+    let app = test_app(&temp_dir).await;
+
+    for (path, content_type) in [
+        ("/assets/styles.css", "text/css; charset=utf-8"),
+        ("/assets/app.js", "application/javascript; charset=utf-8"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(CONTENT_TYPE).unwrap(), content_type);
+        assert_static_security_headers(&response);
+    }
+
+    for path in [
+        "/assets",
+        "/assets/",
+        "/assets/missing.txt",
+        "/assets/nested/missing.js",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_static_security_headers(&response);
+    }
+}
+
+fn assert_static_security_headers(response: &Response) {
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok()),
+        Some(
+            "default-src 'self'; connect-src 'self'; form-action 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        )
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(REFERRER_POLICY)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-referrer")
     );
 }
 

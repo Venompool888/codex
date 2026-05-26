@@ -83,6 +83,10 @@ pub fn build_router(config: Config) -> Router {
         store,
     };
     Router::new()
+        .route("/", get(crate::static_ui::index))
+        .route("/assets", get(crate::static_ui::asset_root))
+        .route("/assets/", get(crate::static_ui::asset_root))
+        .route("/assets/{*path}", get(crate::static_ui::asset))
         .route("/api/health", get(health))
         .route("/api/setup", post(setup))
         .route("/api/sessions", get(list_sessions).post(create_session))
