@@ -53,6 +53,20 @@ struct HealthResponse {
     status: &'static str,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentStatusResponse {
+    status: &'static str,
+    setup_complete: bool,
+    workspace_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentLogsResponse {
+    entries: Vec<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SetupRequest {
@@ -88,6 +102,8 @@ pub fn build_router(config: Config) -> Router {
         .route("/assets/", get(crate::static_ui::asset_root))
         .route("/assets/{*path}", get(crate::static_ui::asset))
         .route("/api/health", get(health))
+        .route("/api/agent/status", get(agent_status))
+        .route("/api/agent/logs", get(agent_logs))
         .route("/api/setup", post(setup))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{session_id}/events", get(session_events))
@@ -114,6 +130,26 @@ pub fn build_router(config: Config) -> Router {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+async fn agent_status(State(state): State<AppState>) -> Json<AgentStatusResponse> {
+    let setup_complete = state
+        .store
+        .setup_state()
+        .await
+        .map(|setup| setup.setup_complete)
+        .unwrap_or(false);
+    Json(AgentStatusResponse {
+        status: "ok",
+        setup_complete,
+        workspace_count: state.config.workspaces().len(),
+    })
+}
+
+async fn agent_logs(_auth: Authenticated) -> Json<AgentLogsResponse> {
+    Json(AgentLogsResponse {
+        entries: vec!["codex-remote-agent is running".to_string()],
+    })
 }
 
 async fn setup(

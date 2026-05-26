@@ -307,6 +307,97 @@ async fn protected_endpoint_requires_bearer_token() {
 }
 
 #[tokio::test]
+async fn agent_status_reports_ok_without_auth() {
+    let temp_dir = TempDir::new().unwrap();
+    let app = test_app(&temp_dir).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/agent/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        response_json(response).await,
+        json!({
+            "status": "ok",
+            "setupComplete": false,
+            "workspaceCount": 0,
+        })
+    );
+}
+
+#[tokio::test]
+async fn agent_status_reports_setup_and_workspace_count() {
+    let temp_dir = TempDir::new().unwrap();
+    let first_repo = temp_dir.path().join("repo-1");
+    let second_repo = temp_dir.path().join("repo-2");
+    tokio::fs::create_dir_all(&first_repo).await.unwrap();
+    tokio::fs::create_dir_all(&second_repo).await.unwrap();
+    let app =
+        test_app_with_workspaces(temp_dir.path().join("state"), vec![first_repo, second_repo])
+            .await;
+
+    setup_and_extract_token(app.clone()).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/agent/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(response).await,
+        json!({
+            "status": "ok",
+            "setupComplete": true,
+            "workspaceCount": 2,
+        })
+    );
+}
+
+#[tokio::test]
+async fn agent_logs_requires_bearer_token() {
+    let temp_dir = TempDir::new().unwrap();
+    let app = test_app(&temp_dir).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/agent/logs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn agent_logs_returns_running_entry_with_setup_session_token() {
+    let temp_dir = TempDir::new().unwrap();
+    let app = test_app(&temp_dir).await;
+    let session_token = setup_and_extract_token(app.clone()).await;
+
+    let response = get_with_token(app, "/api/agent/logs", &session_token).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(response).await,
+        json!({"entries":["codex-remote-agent is running"]})
+    );
+}
+
+#[tokio::test]
 async fn setup_rejects_wrong_setup_token() {
     let temp_dir = TempDir::new().unwrap();
     let app = test_app(&temp_dir).await;
