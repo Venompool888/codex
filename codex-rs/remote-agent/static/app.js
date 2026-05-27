@@ -7,31 +7,62 @@ const state = {
   sessions: [],
   selectedWorkspaceId: "",
   selectedSessionId: "",
+  selectedHistory: [],
+  selectedHistoryIndex: -1,
   events: [],
   approvals: new Map(),
   eventSource: null,
   diffRequestId: 0,
   refreshGeneration: 0,
   selectionGeneration: 0,
+  diffOpen: false,
+  paletteOpen: false,
+  infoOpen: false,
+  mobileSidebarOpen: false,
+  composerNotice: "",
 };
 
 const elements = {
   activeSessionLabel: document.getElementById("activeSessionLabel"),
-  authPanel: document.getElementById("authPanel"),
+  activeWorkspaceLabel: document.getElementById("activeWorkspaceLabel"),
+  appFrame: document.getElementById("appFrame"),
+  backButton: document.getElementById("backButton"),
+  commandPalette: document.getElementById("commandPalette"),
+  composerStatus: document.getElementById("composerStatus"),
   connectionStatus: document.getElementById("connectionStatus"),
+  desktopShell: document.getElementById("desktopShell"),
+  diffCloseButton: document.getElementById("diffCloseButton"),
+  diffDrawer: document.getElementById("diffDrawer"),
   diffPanel: document.getElementById("diffPanel"),
   diffSummary: document.getElementById("diffSummary"),
+  diffToggleButton: document.getElementById("diffToggleButton"),
   eventStream: document.getElementById("eventStream"),
+  forwardButton: document.getElementById("forwardButton"),
+  infoButton: document.getElementById("infoButton"),
+  infoCloseButton: document.getElementById("infoCloseButton"),
+  infoDetails: document.getElementById("infoDetails"),
+  infoPanel: document.getElementById("infoPanel"),
   messageForm: document.getElementById("messageForm"),
   messageInput: document.getElementById("messageInput"),
   messageSend: document.getElementById("messageSend"),
+  mobileSidebarButton: document.getElementById("mobileSidebarButton"),
+  newSessionButton: document.getElementById("newSessionButton"),
+  paletteButton: document.getElementById("paletteButton"),
+  paletteResults: document.getElementById("paletteResults"),
+  paletteSearch: document.getElementById("paletteSearch"),
   refreshButton: document.getElementById("refreshButton"),
   sessionForm: document.getElementById("sessionForm"),
-  sessionList: document.getElementById("sessionList"),
   sessionTitle: document.getElementById("sessionTitle"),
   setupForm: document.getElementById("setupForm"),
+  setupGate: document.getElementById("setupGate"),
+  setupStatus: document.getElementById("setupStatus"),
   setupToken: document.getElementById("setupToken"),
+  sidebarCloseButton: document.getElementById("sidebarCloseButton"),
+  sidebarInfoButton: document.getElementById("sidebarInfoButton"),
+  sidebarPaletteButton: document.getElementById("sidebarPaletteButton"),
+  sidebarSummary: document.getElementById("sidebarSummary"),
   workspaceList: document.getElementById("workspaceList"),
+  workspaceSidebar: document.getElementById("workspaceSidebar"),
 };
 
 elements.setupForm.addEventListener("submit", async (event) => {
@@ -43,6 +74,73 @@ elements.refreshButton.addEventListener("click", () => {
   refreshData();
 });
 
+elements.backButton.addEventListener("click", () => {
+  moveSelectionHistory(-1);
+});
+
+elements.forwardButton.addEventListener("click", () => {
+  moveSelectionHistory(1);
+});
+
+elements.diffToggleButton.addEventListener("click", () => {
+  setDiffOpen(!state.diffOpen);
+});
+
+elements.diffCloseButton.addEventListener("click", () => {
+  setDiffOpen(false);
+});
+
+elements.infoButton.addEventListener("click", () => {
+  setInfoOpen(true);
+});
+
+elements.sidebarInfoButton.addEventListener("click", () => {
+  setInfoOpen(true);
+});
+
+elements.infoCloseButton.addEventListener("click", () => {
+  setInfoOpen(false);
+});
+
+elements.paletteButton.addEventListener("click", () => {
+  openCommandPalette();
+});
+
+elements.sidebarPaletteButton.addEventListener("click", () => {
+  openCommandPalette();
+});
+
+elements.paletteSearch.addEventListener("input", () => {
+  renderPaletteResults();
+});
+
+elements.paletteSearch.addEventListener("keydown", (event) => {
+  const items = [...elements.paletteResults.querySelectorAll(".palette-item")];
+  const activeIndex = items.findIndex((item) => item.classList.contains("active"));
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    setActivePaletteIndex(items, Math.min(items.length - 1, activeIndex + 1));
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    setActivePaletteIndex(items, Math.max(0, activeIndex - 1));
+  } else if (event.key === "Enter" && activeIndex >= 0) {
+    event.preventDefault();
+    items[activeIndex].click();
+  }
+});
+
+elements.mobileSidebarButton.addEventListener("click", () => {
+  setMobileSidebarOpen(true);
+});
+
+elements.sidebarCloseButton.addEventListener("click", () => {
+  setMobileSidebarOpen(false);
+});
+
+elements.newSessionButton.addEventListener("click", () => {
+  elements.sessionTitle.focus();
+});
+
 elements.sessionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   await createSession();
@@ -50,18 +148,42 @@ elements.sessionForm.addEventListener("submit", async (event) => {
 
 elements.messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (!state.token || !state.selectedSessionId) {
-    setConnection("Select a session before sending.", "error");
-    renderComposerState();
+  revealComposerStatus();
+});
+
+elements.messageInput.addEventListener("focus", () => {
+  revealComposerStatus();
+});
+
+document.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    openCommandPalette();
     return;
   }
-  setConnection("Message sending is not available in this backend yet.", "error");
+  if (event.key === "Escape") {
+    if (state.paletteOpen) {
+      closeCommandPalette();
+      return;
+    }
+    if (state.infoOpen) {
+      setInfoOpen(false);
+      return;
+    }
+    if (state.diffOpen) {
+      setDiffOpen(false);
+      return;
+    }
+    setMobileSidebarOpen(false);
+  }
 });
 
 bootstrap();
 
 async function bootstrap() {
   renderAuthState();
+  renderWorkspaces();
+  renderEvents();
   if (state.token) {
     await refreshData();
   }
@@ -124,9 +246,9 @@ async function refreshData() {
     if (selectedSession) {
       state.selectedSessionId = selectedSession.id;
       state.selectedWorkspaceId = selectedSession.workspaceId;
+      pushSelectionHistory(selectedSession.id);
     }
     renderWorkspaces();
-    renderSessions();
     renderComposerState();
     setConnection("Connected", "connected");
     if (state.selectedWorkspaceId && workspaceAvailable(state.selectedWorkspaceId)) {
@@ -142,6 +264,7 @@ async function refreshData() {
     ) {
       connectEvents(selectedSession.id);
     }
+    renderTitlebar();
   } catch (error) {
     if (state.refreshGeneration !== generation) {
       return;
@@ -155,7 +278,11 @@ async function refreshData() {
 
 async function createSession() {
   const title = elements.sessionTitle.value.trim();
-  if (!title || !workspaceAvailable(state.selectedWorkspaceId)) {
+  if (!title) {
+    return;
+  }
+  if (!workspaceAvailable(state.selectedWorkspaceId)) {
+    setConnection("Select an available workspace before starting a session.", "error");
     return;
   }
 
@@ -193,10 +320,11 @@ async function loadDiff(workspaceId) {
   const workspace = state.workspaces.find((item) => item.id === workspaceId);
   elements.diffSummary.textContent = workspace ? workspace.displayName : "No workspace selected";
   if (workspace?.error) {
-    elements.diffPanel.classList.add("empty-state");
+    elements.diffPanel.className = "diff-panel empty-state";
     elements.diffPanel.textContent = workspace.error;
     return false;
   }
+  elements.diffPanel.className = "diff-panel loading-state";
   elements.diffPanel.textContent = "Loading diff...";
 
   try {
@@ -217,19 +345,23 @@ async function loadDiff(workspaceId) {
     if (handleAuthError(error, token)) {
       return false;
     }
+    elements.diffPanel.className = "diff-panel empty-state";
     elements.diffPanel.textContent = error.message;
     return false;
   }
 }
 
-async function selectSession(session) {
+async function selectSession(session, options = {}) {
   const generation = ++state.selectionGeneration;
   state.refreshGeneration++;
   state.selectedSessionId = session.id;
   state.selectedWorkspaceId = session.workspaceId;
+  if (options.recordHistory !== false) {
+    pushSelectionHistory(session.id);
+  }
   renderWorkspaces();
-  renderSessions();
   renderComposerState();
+  renderTitlebar();
   if (workspaceAvailable(session.workspaceId)) {
     await loadDiff(session.workspaceId);
   } else {
@@ -253,6 +385,7 @@ function selectWorkspace(workspaceId) {
   state.selectedWorkspaceId = workspaceId;
   renderWorkspaces();
   loadDiff(workspaceId);
+  renderTitlebar();
 }
 
 function connectEvents(sessionId) {
@@ -270,6 +403,7 @@ function connectEvents(sessionId) {
   elements.activeSessionLabel.textContent = session ? session.title : sessionId;
   renderComposerState();
   renderEvents();
+  renderTitlebar();
 
   const url = `/api/sessions/${encodeURIComponent(sessionId)}/events?token=${encodeURIComponent(
     token,
@@ -357,14 +491,20 @@ function clearSessionToken() {
   state.approvals.clear();
   state.selectedWorkspaceId = "";
   state.selectedSessionId = "";
+  state.selectedHistory = [];
+  state.selectedHistoryIndex = -1;
+  state.composerNotice = "";
   elements.sessionTitle.value = "";
   elements.messageInput.value = "";
   elements.activeSessionLabel.textContent = "No session selected";
+  elements.activeWorkspaceLabel.textContent = "No workspace selected";
   elements.diffSummary.textContent = "No workspace selected";
-  elements.diffPanel.classList.add("empty-state");
+  elements.diffPanel.className = "diff-panel empty-state";
   elements.diffPanel.textContent = "Diff summary will appear here.";
+  setDiffOpen(false);
+  setInfoOpen(false);
+  setMobileSidebarOpen(false);
   renderWorkspaces();
-  renderSessions();
   renderEvents();
   renderAuthState();
 }
@@ -378,93 +518,156 @@ function handleAuthError(error, token) {
 }
 
 function renderAuthState() {
-  elements.authPanel.hidden = Boolean(state.token);
-  elements.sessionForm.hidden = !state.token;
-  elements.refreshButton.disabled = !state.token;
+  const connected = Boolean(state.token);
+  elements.setupGate.hidden = connected;
+  elements.appFrame.hidden = !connected;
+  elements.sessionForm.hidden = !connected;
+  elements.refreshButton.disabled = !connected;
+  elements.paletteButton.disabled = !connected;
+  elements.sidebarPaletteButton.disabled = !connected;
+  elements.newSessionButton.disabled = !connected;
   renderComposerState();
-  setConnection(state.token ? "Connected" : "Signed out", state.token ? "connected" : "");
+  renderTitlebar();
+  setConnection(connected ? "Connected" : "Signed out", connected ? "connected" : "");
+}
+
+function renderTitlebar() {
+  const session = selectedSession();
+  const workspace = selectedWorkspace();
+  elements.activeSessionLabel.textContent = session ? session.title : "No session selected";
+  elements.activeWorkspaceLabel.textContent = workspace
+    ? `${workspace.displayName} · ${workspace.path}`
+    : "No workspace selected";
+  elements.sidebarSummary.textContent = state.token
+    ? `Deterministic backend · ${state.workspaces.length} workspaces`
+    : "Signed out";
+  elements.backButton.disabled = state.selectedHistoryIndex <= 0;
+  elements.forwardButton.disabled =
+    state.selectedHistoryIndex < 0 ||
+    state.selectedHistoryIndex >= state.selectedHistory.length - 1;
+  elements.diffToggleButton.setAttribute("aria-pressed", String(state.diffOpen));
+  elements.desktopShell.classList.toggle("diff-open", state.diffOpen);
+  elements.desktopShell.classList.toggle("sidebar-open", state.mobileSidebarOpen);
+}
+
+function setConnection(text, mode = "") {
+  elements.connectionStatus.textContent = text;
+  elements.connectionStatus.className = `connection ${mode}`.trim();
+  elements.setupStatus.textContent = text;
+  elements.setupStatus.className = `setup-status ${mode}`.trim();
+}
+
+function setDiffOpen(open) {
+  state.diffOpen = open;
+  elements.diffDrawer.setAttribute("aria-hidden", String(!open));
+  renderTitlebar();
+}
+
+function setInfoOpen(open) {
+  state.infoOpen = open;
+  elements.infoPanel.hidden = !open;
+  if (open) {
+    renderInfoPanel();
+    elements.infoCloseButton.focus();
+  }
+}
+
+function setMobileSidebarOpen(open) {
+  state.mobileSidebarOpen = open;
+  renderTitlebar();
 }
 
 function renderComposerState() {
-  const enabled = Boolean(state.token && state.selectedSessionId);
-  elements.messageInput.disabled = !enabled;
-  elements.messageSend.disabled = !enabled;
+  elements.messageInput.disabled = true;
+  elements.messageSend.disabled = true;
+  elements.messageInput.placeholder = "Message sending unavailable in deterministic backend";
+  elements.composerStatus.textContent =
+    state.composerNotice || "Message sending unavailable in deterministic backend.";
+}
+
+function revealComposerStatus() {
+  state.composerNotice =
+    "The current deterministic backend can stream sessions, approvals, and diffs, but it cannot accept chat messages.";
+  renderComposerState();
+  elements.composerStatus.classList.add("attention");
+  setTimeout(() => {
+    elements.composerStatus.classList.remove("attention");
+  }, 1200);
 }
 
 function renderWorkspaces() {
   elements.workspaceList.classList.toggle("empty-state", state.workspaces.length === 0);
   elements.workspaceList.replaceChildren(
-    ...state.workspaces.map((workspace) => {
-      const item = document.createElement("button");
-      item.type = "button";
-      item.disabled = Boolean(workspace.error);
-      item.className = `item ${workspace.id === state.selectedWorkspaceId ? "active" : ""}`;
-      item.addEventListener("click", () => {
-        selectWorkspace(workspace.id);
-      });
-
-      const title = document.createElement("div");
-      title.className = "item-title";
-      title.append(itemTitleText(workspace.displayName));
-      if (workspace.dirty) {
-        const dirty = document.createElement("span");
-        dirty.className = "status-pill stale";
-        dirty.textContent = "dirty";
-        title.append(dirty);
-      }
-      if (workspace.error) {
-        const error = document.createElement("span");
-        error.className = "status-pill failed";
-        error.textContent = "error";
-        title.append(error);
-      }
-
-      const meta = document.createElement("div");
-      meta.className = "item-meta";
-      meta.textContent = [workspace.branch, workspace.path, workspace.error]
-        .filter(Boolean)
-        .join(" - ");
-      item.append(title, meta);
-      return item;
-    }),
+    ...state.workspaces.map((workspace) => renderProjectGroup(workspace)),
   );
   if (state.workspaces.length === 0) {
     elements.workspaceList.textContent = "No workspaces configured.";
   }
+  renderTitlebar();
 }
 
-function renderSessions() {
-  const sessions = sortedSessions();
-  elements.sessionList.classList.toggle("empty-state", sessions.length === 0);
-  elements.sessionList.replaceChildren(
-    ...sessions.map((session) => {
-      const item = document.createElement("button");
-      item.type = "button";
-      item.className = `item ${session.id === state.selectedSessionId ? "active" : ""}`;
-      item.addEventListener("click", () => {
-        selectSession(session);
-      });
+function renderProjectGroup(workspace) {
+  const group = document.createElement("section");
+  group.className = `project-group ${workspace.id === state.selectedWorkspaceId ? "active" : ""}`;
 
-      const title = document.createElement("div");
-      title.className = "item-title";
-      title.append(itemTitleText(session.title));
+  const header = document.createElement("button");
+  header.type = "button";
+  header.disabled = Boolean(workspace.error);
+  header.className = "project-header";
+  header.addEventListener("click", () => {
+    selectWorkspace(workspace.id);
+  });
 
-      const status = document.createElement("span");
-      status.className = `status-pill ${session.status.toLowerCase()}`;
-      status.textContent = splitCamelCase(session.status);
-      title.append(status);
+  const title = document.createElement("span");
+  title.className = "project-title";
+  title.textContent = workspace.displayName;
 
-      const workspace = state.workspaces.find((item) => item.id === session.workspaceId);
-      const meta = document.createElement("div");
-      meta.className = "item-meta";
-      meta.textContent = workspace ? workspace.displayName : session.workspaceId;
-      item.append(title, meta);
-      return item;
-    }),
-  );
+  const badge = document.createElement("span");
+  badge.className = `status-pill ${workspace.error ? "failed" : workspace.dirty ? "stale" : "running"}`;
+  badge.textContent = workspace.error ? "error" : workspace.dirty ? "dirty" : "ready";
+
+  const meta = document.createElement("span");
+  meta.className = "project-meta";
+  meta.textContent = [workspace.branch, workspace.path, workspace.error].filter(Boolean).join(" · ");
+
+  header.append(title, badge, meta);
+  group.append(header);
+
+  const threads = document.createElement("div");
+  threads.className = "thread-list";
+  const sessions = sessionsForWorkspace(workspace.id);
   if (sessions.length === 0) {
-    elements.sessionList.textContent = "No sessions yet.";
+    const empty = document.createElement("div");
+    empty.className = "thread-empty";
+    empty.textContent = workspace.error ? "Workspace unavailable" : "No sessions";
+    threads.append(empty);
+  } else {
+    threads.append(...sessions.map((session) => renderThreadRow(session, Boolean(workspace.error))));
   }
+  group.append(threads);
+  return group;
+}
+
+function renderThreadRow(session, workspaceUnavailable) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.disabled = workspaceUnavailable;
+  item.className = `thread-row ${session.id === state.selectedSessionId ? "active" : ""}`;
+  item.addEventListener("click", () => {
+    selectSession(session);
+    setMobileSidebarOpen(false);
+  });
+
+  const title = document.createElement("span");
+  title.className = "thread-title";
+  title.textContent = session.title;
+
+  const status = document.createElement("span");
+  status.className = `status-pill ${session.status.toLowerCase()}`;
+  status.textContent = splitCamelCase(session.status);
+
+  item.append(title, status);
+  return item;
 }
 
 function renderEvents() {
@@ -481,50 +684,101 @@ function renderEvents() {
 }
 
 function renderEvent(event) {
-  const row = document.createElement("div");
-  row.className = "event";
+  switch (event.kind.type) {
+    case "sessionCreated":
+      return eventBubble("assistant", "Session created.");
+    case "statusText":
+      return timelineSeparator(event.kind.status);
+    case "messageDelta":
+      return eventBubble(event.kind.role, event.kind.content);
+    case "toolCallStarted":
+      return actionBlock("Command started", commandElement(event.kind.command));
+    case "toolCallCompleted":
+      return timelineSeparator(`Command exited ${event.kind.exitCode}.`);
+    case "approvalRequested":
+      return approvalBlock(event.kind.approvalId);
+    case "approvalDecided":
+      return timelineSeparator(event.kind.approved ? "Approval granted." : "Approval denied.");
+    case "diffUpdated":
+      return diffEventBlock();
+    case "errorRaised":
+      return eventBubble("error", event.kind.message);
+    default:
+      return eventBubble("system", JSON.stringify(event.kind));
+  }
+}
 
-  const type = document.createElement("div");
-  type.className = "event-type";
-  type.textContent = splitCamelCase(event.kind.type);
+function eventBubble(role, content) {
+  const row = document.createElement("article");
+  row.className = `chat-row ${role.toLowerCase()}`;
+
+  const label = document.createElement("div");
+  label.className = "chat-role";
+  label.textContent = splitCamelCase(role);
 
   const text = document.createElement("div");
-  text.className = "event-text";
-  text.append(eventText(event.kind));
+  text.className = "chat-text";
+  text.textContent = content;
 
-  row.append(type, text);
-  if (event.kind.type === "approvalRequested") {
-    row.append(approvalControls(event.kind.approvalId));
-  }
+  row.append(label, text);
   return row;
 }
 
-function eventText(kind) {
-  switch (kind.type) {
-    case "sessionCreated":
-      return "Session created.";
-    case "statusText":
-      return kind.status;
-    case "messageDelta":
-      return `${kind.role}: ${kind.content}`;
-    case "toolCallStarted":
-      return commandElement(kind.command);
-    case "toolCallCompleted":
-      return `Command exited ${kind.exitCode}.`;
-    case "approvalRequested":
-      return `Approval requested: ${kind.approvalId}`;
-    case "approvalDecided":
-      return kind.approved ? "Approval granted." : "Approval denied.";
-    case "diffUpdated":
-      return "Diff updated.";
-    case "errorRaised":
-      return kind.message;
-    default:
-      return JSON.stringify(kind);
-  }
+function timelineSeparator(text) {
+  const row = document.createElement("div");
+  row.className = "timeline-separator";
+  row.textContent = text;
+  return row;
+}
+
+function actionBlock(title, content) {
+  const row = document.createElement("section");
+  row.className = "action-block";
+  const heading = document.createElement("div");
+  heading.className = "action-title";
+  heading.textContent = title;
+  row.append(heading, content);
+  return row;
+}
+
+function approvalBlock(approvalId) {
+  const row = document.createElement("section");
+  row.className = "action-block approval-block";
+
+  const heading = document.createElement("div");
+  heading.className = "action-title";
+  heading.textContent = "Approval requested";
+
+  const body = document.createElement("div");
+  body.className = "action-body";
+  body.textContent = approvalId;
+
+  row.append(heading, body, approvalControls(approvalId));
+  return row;
+}
+
+function diffEventBlock() {
+  const row = document.createElement("section");
+  row.className = "action-block diff-event";
+
+  const heading = document.createElement("div");
+  heading.className = "action-title";
+  heading.textContent = "Diff updated";
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Open Diff";
+  button.addEventListener("click", () => {
+    setDiffOpen(true);
+  });
+
+  row.append(heading, button);
+  return row;
 }
 
 function renderDiff(diff) {
+  elements.diffPanel.className = "diff-panel";
   elements.diffSummary.textContent = `${diff.files.length} files, +${diff.additions} -${diff.deletions}`;
   elements.diffPanel.classList.toggle("empty-state", diff.files.length === 0);
   if (diff.files.length === 0) {
@@ -634,13 +888,6 @@ async function submitApproval(approvalId, approved) {
   }
 }
 
-function itemTitleText(text) {
-  const span = document.createElement("span");
-  span.className = "item-title-text";
-  span.textContent = text;
-  return span;
-}
-
 function appendSessionEvent(event, sessionId) {
   updateApprovalState(event.kind);
   state.events.push(event);
@@ -692,9 +939,164 @@ function refreshSessionDiff(sessionId) {
   const workspaceId = selectedSessionWorkspaceId();
   if (workspaceId && workspaceId === state.selectedWorkspaceId && workspaceAvailable(workspaceId)) {
     loadDiff(workspaceId);
-  } else if (workspaceId) {
+  }
+}
+
+function openCommandPalette() {
+  if (!state.token) {
     return;
   }
+  state.paletteOpen = true;
+  elements.commandPalette.hidden = false;
+  elements.paletteSearch.value = "";
+  renderPaletteResults();
+  elements.paletteSearch.focus();
+}
+
+function closeCommandPalette() {
+  state.paletteOpen = false;
+  elements.commandPalette.hidden = true;
+}
+
+function paletteItems() {
+  const actions = [
+    {
+      label: "Refresh remote state",
+      detail: "Reload workspaces, sessions, status, and diff",
+      run: () => refreshData(),
+    },
+    {
+      label: state.diffOpen ? "Close diff drawer" : "Open diff drawer",
+      detail: "Toggle the workspace diff inspector",
+      run: () => setDiffOpen(!state.diffOpen),
+    },
+    {
+      label: "Open connection info",
+      detail: "Show current agent, workspace, and session details",
+      run: () => setInfoOpen(true),
+    },
+    {
+      label: "Reveal composer status",
+      detail: "Explain why message sending is disabled",
+      run: () => revealComposerStatus(),
+    },
+  ];
+  if (workspaceAvailable(state.selectedWorkspaceId)) {
+    actions.unshift({
+      label: "New session",
+      detail: "Focus the session title field",
+      run: () => elements.sessionTitle.focus(),
+    });
+  }
+
+  const workspaces = state.workspaces
+    .filter((workspace) => !workspace.error)
+    .map((workspace) => ({
+      label: workspace.displayName,
+      detail: workspace.path,
+      run: () => selectWorkspace(workspace.id),
+    }));
+
+  const sessions = sortedSessions()
+    .filter((session) => workspaceAvailable(session.workspaceId))
+    .map((session) => ({
+      label: session.title,
+      detail: splitCamelCase(session.status),
+      run: () => selectSession(session),
+    }));
+
+  return [...actions, ...workspaces, ...sessions];
+}
+
+function renderPaletteResults() {
+  const query = elements.paletteSearch.value.trim().toLowerCase();
+  const items = paletteItems().filter((item) => {
+    const haystack = `${item.label} ${item.detail}`.toLowerCase();
+    return haystack.includes(query);
+  });
+
+  elements.paletteResults.replaceChildren(
+    ...items.map((item, index) => renderPaletteItem(item, index === 0)),
+  );
+  if (items.length === 0) {
+    elements.paletteResults.textContent = "No matching real actions.";
+  }
+}
+
+function renderPaletteItem(item, active) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `palette-item ${active ? "active" : ""}`;
+  button.addEventListener("click", () => {
+    closeCommandPalette();
+    item.run();
+  });
+
+  const label = document.createElement("span");
+  label.className = "palette-label";
+  label.textContent = item.label;
+
+  const detail = document.createElement("span");
+  detail.className = "palette-detail";
+  detail.textContent = item.detail;
+
+  button.append(label, detail);
+  return button;
+}
+
+function setActivePaletteIndex(items, index) {
+  items.forEach((item, itemIndex) => {
+    item.classList.toggle("active", itemIndex === index);
+  });
+}
+
+function renderInfoPanel() {
+  const workspace = selectedWorkspace();
+  const session = selectedSession();
+  const rows = [
+    ["Connection", state.token ? "Connected" : "Signed out"],
+    ["Backend", "Deterministic"],
+    ["Workspaces", String(state.workspaces.length)],
+    ["Workspace", workspace ? workspace.displayName : "None"],
+    ["Workspace path", workspace ? workspace.path : "None"],
+    ["Session", session ? session.title : "None"],
+    ["Session status", session ? splitCamelCase(session.status) : "None"],
+  ];
+
+  elements.infoDetails.replaceChildren(
+    ...rows.flatMap(([key, value]) => {
+      const term = document.createElement("dt");
+      term.textContent = key;
+      const description = document.createElement("dd");
+      description.textContent = value;
+      return [term, description];
+    }),
+  );
+}
+
+function pushSelectionHistory(sessionId) {
+  if (!sessionId) {
+    return;
+  }
+  if (state.selectedHistory[state.selectedHistoryIndex] === sessionId) {
+    return;
+  }
+  state.selectedHistory = state.selectedHistory.slice(0, state.selectedHistoryIndex + 1);
+  state.selectedHistory.push(sessionId);
+  state.selectedHistoryIndex = state.selectedHistory.length - 1;
+}
+
+function moveSelectionHistory(delta) {
+  const nextIndex = state.selectedHistoryIndex + delta;
+  if (nextIndex < 0 || nextIndex >= state.selectedHistory.length) {
+    return;
+  }
+  const session = state.sessions.find((item) => item.id === state.selectedHistory[nextIndex]);
+  if (!session) {
+    return;
+  }
+  state.selectedHistoryIndex = nextIndex;
+  selectSession(session, { recordHistory: false });
 }
 
 function isCurrentEventSource(source, sessionId, token) {
@@ -712,6 +1114,18 @@ function isCurrentDiffRequest(workspaceId, requestId, token) {
 
 function sortedSessions() {
   return [...state.sessions].sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function sessionsForWorkspace(workspaceId) {
+  return sortedSessions().filter((session) => session.workspaceId === workspaceId);
+}
+
+function selectedWorkspace() {
+  return state.workspaces.find((workspace) => workspace.id === state.selectedWorkspaceId);
+}
+
+function selectedSession() {
+  return state.sessions.find((session) => session.id === state.selectedSessionId);
 }
 
 function selectedSessionWorkspaceId() {
@@ -735,7 +1149,7 @@ function firstAvailableWorkspace() {
 
 function renderMissingWorkspaceDiff(workspaceId) {
   elements.diffSummary.textContent = workspaceId;
-  elements.diffPanel.classList.add("empty-state");
+  elements.diffPanel.className = "diff-panel empty-state";
   elements.diffPanel.textContent = "Session workspace is not available.";
 }
 
@@ -743,9 +1157,4 @@ function splitCamelCase(value) {
   return value
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/^./, (char) => char.toUpperCase());
-}
-
-function setConnection(text, mode = "") {
-  elements.connectionStatus.textContent = text;
-  elements.connectionStatus.className = `connection ${mode}`.trim();
 }
