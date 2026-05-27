@@ -206,9 +206,20 @@ async fn serves_embedded_web_ui() {
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(body.contains(r#"/assets/styles.css"#));
     assert!(body.contains(r#"/assets/app.js"#));
-    assert!(body.contains(r#"id="messageForm""#));
-    assert!(body.contains(r#"id="messageInput""#));
-    assert!(body.contains(r#"id="messageSend""#));
+    assert!(body.contains(r#"class="desktop-shell""#));
+    assert!(body.contains(r#"id="setupGate""#));
+    assert!(body.contains(r#"id="desktopTitlebar""#));
+    assert!(body.contains(r#"id="workspaceSidebar""#));
+    assert!(body.contains(r#"id="sessionSurface""#));
+    assert!(body.contains(r#"id="diffDrawer""#));
+    assert!(body.contains(r#"id="commandPalette""#));
+    assert!(body.contains(r#"id="infoPanel""#));
+    assert!(body.contains(r#"id="composerStatus""#));
+    assert!(!body.contains(">File<"));
+    assert!(!body.contains(">Edit<"));
+    assert!(!body.contains(">View<"));
+    assert!(!body.contains(">Window<"));
+    assert!(!body.contains(">Help<"));
 }
 
 #[tokio::test]

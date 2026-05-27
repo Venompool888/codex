@@ -7,71 +7,116 @@
     <link rel="stylesheet" href="/assets/styles.css">
   </head>
   <body>
-    <div class="app-shell">
-      <header class="topbar">
-        <div>
+    <div class="desktop-shell" id="desktopShell">
+      <section class="setup-gate" id="setupGate" aria-labelledby="setupTitle">
+        <div class="setup-card">
           <p class="eyebrow">Codex Remote</p>
-          <h1>Remote Agent</h1>
-        </div>
-        <div class="connection" id="connectionStatus">Signed out</div>
-      </header>
-
-      <main class="workspace-grid">
-        <section class="panel auth-panel" id="authPanel">
-          <div class="panel-heading">
-            <h2>Setup</h2>
-          </div>
-          <form id="setupForm" class="stack">
+          <h1 id="setupTitle">Connect to remote agent</h1>
+          <p class="setup-copy">Enter the one-time setup token from the server.</p>
+          <form id="setupForm" class="setup-form">
             <label for="setupToken">Setup token</label>
             <div class="inline-field">
               <input id="setupToken" name="setupToken" type="password" autocomplete="one-time-code" required>
               <button type="submit">Connect</button>
             </div>
           </form>
-        </section>
+          <div class="setup-status" id="setupStatus">Signed out</div>
+        </div>
+      </section>
 
-        <section class="panel">
-          <div class="panel-heading">
-            <h2>Workspaces</h2>
-            <button type="button" id="refreshButton">Refresh</button>
+      <div class="app-frame" id="appFrame" hidden>
+        <header class="desktop-titlebar" id="desktopTitlebar">
+          <div class="window-dots" aria-hidden="true">
+            <span></span><span></span><span></span>
           </div>
-          <div id="workspaceList" class="list empty-state">No workspaces loaded.</div>
-        </section>
+          <nav class="titlebar-controls" aria-label="Session navigation">
+            <button type="button" class="icon-button" id="backButton" aria-label="Back">‹</button>
+            <button type="button" class="icon-button" id="forwardButton" aria-label="Forward">›</button>
+            <button type="button" class="icon-button" id="refreshButton" aria-label="Refresh">↻</button>
+          </nav>
+          <div class="titlebar-center">
+            <div class="titlebar-title" id="activeSessionLabel">No session selected</div>
+            <div class="titlebar-subtitle" id="activeWorkspaceLabel">No workspace selected</div>
+          </div>
+          <div class="titlebar-actions">
+            <button type="button" class="titlebar-button" id="mobileSidebarButton">Workspaces</button>
+            <button type="button" class="titlebar-button" id="paletteButton">⌘K</button>
+            <button type="button" class="titlebar-button" id="diffToggleButton">Diff</button>
+            <button type="button" class="titlebar-button" id="infoButton">Info</button>
+            <div class="connection" id="connectionStatus">Signed out</div>
+          </div>
+        </header>
 
-        <section class="panel">
-          <div class="panel-heading">
-            <h2>Sessions</h2>
-          </div>
-          <form id="sessionForm" class="stack">
-            <label for="sessionTitle">New session</label>
-            <div class="inline-field">
-              <input id="sessionTitle" name="sessionTitle" type="text" maxlength="200" placeholder="Task title" required>
-              <button type="submit">Start</button>
+        <div class="desktop-body">
+          <aside class="workspace-sidebar" id="workspaceSidebar" aria-label="Workspaces and sessions">
+            <div class="sidebar-header">
+              <div>
+                <p class="eyebrow">Codex Remote</p>
+                <h2>Remote Agent</h2>
+              </div>
+              <button type="button" class="icon-button sidebar-close" id="sidebarCloseButton" aria-label="Close sidebar">×</button>
             </div>
-          </form>
-          <div id="sessionList" class="list empty-state">No sessions yet.</div>
-        </section>
+            <div class="sidebar-summary" id="sidebarSummary">Deterministic backend</div>
+            <div class="sidebar-actions">
+              <button type="button" id="newSessionButton">New session</button>
+              <button type="button" id="sidebarPaletteButton">Command Palette</button>
+            </div>
+            <div class="new-session-card" id="newSessionCard">
+              <form id="sessionForm" class="stack">
+                <label for="sessionTitle">Session title</label>
+                <div class="inline-field">
+                  <input id="sessionTitle" name="sessionTitle" type="text" maxlength="200" placeholder="Task title" required>
+                  <button type="submit">Start</button>
+                </div>
+              </form>
+            </div>
+            <div class="sidebar-section-title">Projects</div>
+            <div id="workspaceList" class="project-list empty-state">No workspaces loaded.</div>
+            <button type="button" class="connection-details-button" id="sidebarInfoButton">Connection details</button>
+          </aside>
 
-        <section class="panel detail-panel">
-          <div class="panel-heading">
-            <h2>Session Events</h2>
-            <span id="activeSessionLabel" class="muted">No session selected</span>
-          </div>
-          <div id="eventStream" class="event-stream empty-state">Select a session to stream events.</div>
-          <form id="messageForm" class="message-form" aria-label="Message composer">
-            <input id="messageInput" name="message" type="text" placeholder="Message selected session" disabled>
-            <button id="messageSend" type="submit" disabled>Send</button>
-          </form>
-        </section>
+          <main class="session-surface" id="sessionSurface">
+            <section class="session-scroll" id="eventStream" aria-label="Session events">Select a session to stream events.</section>
+            <form id="messageForm" class="composer" aria-label="Message composer">
+              <input id="messageInput" name="message" type="text" placeholder="Message sending unavailable in deterministic backend" disabled>
+              <button id="messageSend" type="submit" disabled>Send</button>
+              <div class="composer-status" id="composerStatus">Message sending unavailable in deterministic backend.</div>
+            </form>
+          </main>
 
-        <section class="panel detail-panel">
-          <div class="panel-heading">
-            <h2>Diff</h2>
-            <span id="diffSummary" class="muted">No workspace selected</span>
+          <aside class="diff-drawer" id="diffDrawer" aria-label="Workspace diff" aria-hidden="true">
+            <div class="drawer-header">
+              <div>
+                <h2>Diff</h2>
+                <div class="muted" id="diffSummary">No workspace selected</div>
+              </div>
+              <button type="button" class="icon-button" id="diffCloseButton" aria-label="Close diff">×</button>
+            </div>
+            <div id="diffPanel" class="diff-panel empty-state">Diff summary will appear here.</div>
+          </aside>
+        </div>
+      </div>
+
+      <section class="command-palette" id="commandPalette" hidden aria-modal="true" role="dialog" aria-labelledby="commandPaletteTitle">
+        <div class="palette-panel">
+          <h2 id="commandPaletteTitle">Command Palette</h2>
+          <input id="paletteSearch" type="search" autocomplete="off" placeholder="Search workspaces, sessions, and actions">
+          <div id="paletteResults" class="palette-results"></div>
+        </div>
+      </section>
+
+      <section class="info-panel" id="infoPanel" hidden aria-modal="true" role="dialog" aria-labelledby="infoPanelTitle">
+        <div class="info-card">
+          <div class="drawer-header">
+            <div>
+              <h2 id="infoPanelTitle">Connection Info</h2>
+              <div class="muted">Real status from the loaded agent state.</div>
+            </div>
+            <button type="button" class="icon-button" id="infoCloseButton" aria-label="Close info">×</button>
           </div>
-          <div id="diffPanel" class="diff-panel empty-state">Diff summary will appear here.</div>
-        </section>
-      </main>
+          <dl id="infoDetails" class="info-details"></dl>
+        </div>
+      </section>
     </div>
     <script src="/assets/app.js" defer></script>
   </body>
