@@ -38,3 +38,9 @@ For service-style installs, use a private state directory such as `/var/lib/code
 ## MVP Limits
 
 The initial backend adapter is deterministic and exists to validate the agent and UI contract. Real Codex protocol integration should replace the adapter behind the session manager boundary.
+
+## Web UI
+
+The embedded Web UI is a dark desktop-style Codex Remote client. After setup, it shows a left workspace/session sidebar, a central session event stream, an on-demand diff drawer, a real command palette (`Ctrl+K` / `Cmd+K`), and a connection info panel.
+
+The current backend is deterministic. The composer is visible to preserve the desktop-client model, but message sending is disabled and explains that limitation instead of fabricating local user messages.
