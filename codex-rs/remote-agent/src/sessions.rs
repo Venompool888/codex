@@ -8,21 +8,17 @@ use anyhow::Context;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::backend::CodexBackend;
 use crate::Store;
-use crate::models::ApprovalRequest;
 use crate::models::ApprovalStatus;
 use crate::models::Session;
 use crate::models::SessionEvent;
 use crate::models::SessionEventKind;
+use crate::models::SessionMetadata;
 use crate::models::SessionStatus;
 use crate::store::TransitionApprovalError;
 
-const SESSION_STARTED_MESSAGE: &str = "Remote Codex session started.";
-const APPROVAL_COMMAND: &str = "git status --short";
-const APPROVAL_ACTION_TYPE: &str = "command";
-const APPROVAL_RISK_SUMMARY: &str = "Read-only repository status check.";
 const DENIED_MESSAGE: &str = "Command denied by user.";
-const WAITING_STATUS_TEXT: &str = "Waiting for approval.";
 const COMPLETED_STATUS_TEXT: &str = "Session completed.";
 const FAILED_STATUS_TEXT: &str = "Session failed.";
 const EVENT_CHANNEL_CAPACITY: usize = 128;
@@ -30,6 +26,7 @@ const EVENT_CHANNEL_CAPACITY: usize = 128;
 #[derive(Clone)]
 pub(crate) struct SessionManager {
     store: Store,
+    backend: Arc<dyn CodexBackend>,
     senders: Arc<Mutex<HashMap<String, broadcast::Sender<SessionEvent>>>>,
 }
 
@@ -91,9 +88,10 @@ impl ApprovalDecision {
 }
 
 impl SessionManager {
-    pub(crate) fn new(store: Store) -> Self {
+    pub(crate) fn new(store: Store, backend: Arc<dyn CodexBackend>) -> Self {
         Self {
             store,
+            backend,
             senders: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -104,24 +102,19 @@ impl SessionManager {
         title: String,
     ) -> anyhow::Result<Session> {
         let now = unix_timestamp()?;
+        let thread = self
+            .backend
+            .start_thread(workspace_id.clone(), title.clone())
+            .await?;
         let session = Session {
             id: new_id(),
             workspace_id,
             title,
-            status: SessionStatus::WaitingForApproval,
+            status: SessionStatus::Completed,
             created_at: now,
             updated_at: now,
         };
-        let approval = ApprovalRequest {
-            id: new_id(),
-            session_id: session.id.clone(),
-            action_type: APPROVAL_ACTION_TYPE.to_string(),
-            command: APPROVAL_COMMAND.to_string(),
-            risk_summary: APPROVAL_RISK_SUMMARY.to_string(),
-            created_at: now,
-            status: ApprovalStatus::Pending,
-        };
-        let events = vec![
+        let mut events = vec![
             SessionEvent {
                 id: new_id(),
                 session_id: session.id.clone(),
@@ -133,30 +126,32 @@ impl SessionManager {
                 session_id: session.id.clone(),
                 created_at: now,
                 kind: SessionEventKind::StatusText {
-                    status: WAITING_STATUS_TEXT.to_string(),
+                    status: "Ready.".to_string(),
                 },
             },
-            SessionEvent {
+        ];
+        if let Some(greeting) = thread.greeting {
+            events.push(SessionEvent {
                 id: new_id(),
                 session_id: session.id.clone(),
                 created_at: now,
                 kind: SessionEventKind::MessageDelta {
                     role: "assistant".to_string(),
-                    content: SESSION_STARTED_MESSAGE.to_string(),
+                    content: greeting,
                 },
-            },
-            SessionEvent {
-                id: new_id(),
-                session_id: session.id.clone(),
-                created_at: now,
-                kind: SessionEventKind::ApprovalRequested {
-                    approval_id: approval.id.clone(),
-                },
-            },
-        ];
+            });
+        }
+        self.store.upsert_session(session.clone()).await?;
         self.store
-            .create_session(session.clone(), events.clone(), approval)
+            .upsert_session_metadata(SessionMetadata {
+                session_id: session.id.clone(),
+                app_server_thread_id: Some(thread.thread_id),
+                active_turn_id: None,
+            })
             .await?;
+        for event in events.clone() {
+            self.store.append_event(event).await?;
+        }
         self.broadcast_events(events);
 
         Ok(session)
@@ -267,6 +262,7 @@ fn unix_timestamp() -> anyhow::Result<i64> {
 #[cfg(test)]
 mod tests {
     use crate::Store;
+    use crate::backend::demo::DemoBackend;
     use crate::models::ApprovalStatus;
     use crate::models::SessionEventKind;
     use crate::models::SessionStatus;
@@ -275,11 +271,15 @@ mod tests {
 
     use super::*;
 
+    fn test_manager(store: Store) -> SessionManager {
+        SessionManager::new(store, Arc::new(DemoBackend::new()))
+    }
+
     #[tokio::test]
-    async fn start_session_records_session_events_and_pending_approval() -> anyhow::Result<()> {
+    async fn start_session_records_backend_thread_metadata() -> anyhow::Result<()> {
         let temp_dir = TempDir::new()?;
         let store = Store::new(temp_dir.path().to_path_buf())?;
-        let manager = SessionManager::new(store.clone());
+        let manager = test_manager(store.clone());
 
         let session = manager
             .start_session("workspace-1".to_string(), "Build feature".to_string())
@@ -291,43 +291,38 @@ mod tests {
                 id: session.id.clone(),
                 workspace_id: "workspace-1".to_string(),
                 title: "Build feature".to_string(),
-                status: SessionStatus::WaitingForApproval,
+                status: SessionStatus::Completed,
                 created_at: session.created_at,
                 updated_at: session.updated_at,
             }]
         );
+        assert_eq!(
+            store.session_metadata(&session.id).await?,
+            Some(crate::models::SessionMetadata {
+                session_id: session.id.clone(),
+                app_server_thread_id: Some("demo-thread".to_string()),
+                active_turn_id: None,
+            }
+            )
+        );
 
         let events = store.events(&session.id).await?;
-        assert_eq!(events.len(), 4);
-        assert_eq!(events[0].kind, SessionEventKind::SessionCreated);
         assert_eq!(
-            events[1].kind,
-            SessionEventKind::StatusText {
-                status: "Waiting for approval.".to_string(),
-            }
+            events
+                .iter()
+                .map(|event| event.kind.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                SessionEventKind::SessionCreated,
+                SessionEventKind::StatusText {
+                    status: "Ready.".to_string(),
+                },
+                SessionEventKind::MessageDelta {
+                    role: "assistant".to_string(),
+                    content: "Remote Codex session ready.".to_string(),
+                },
+            ]
         );
-        assert_eq!(
-            events[2].kind,
-            SessionEventKind::MessageDelta {
-                role: "assistant".to_string(),
-                content: "Remote Codex session started.".to_string(),
-            }
-        );
-        let SessionEventKind::ApprovalRequested { approval_id } = &events[3].kind else {
-            panic!("expected approval requested event");
-        };
-
-        let approvals = store.approvals().await?;
-        assert_eq!(approvals.len(), 1);
-        assert_eq!(approvals[0].id, *approval_id);
-        assert_eq!(approvals[0].session_id, session.id);
-        assert_eq!(approvals[0].action_type, "command");
-        assert_eq!(approvals[0].command, "git status --short");
-        assert_eq!(
-            approvals[0].risk_summary,
-            "Read-only repository status check."
-        );
-        assert_eq!(approvals[0].status, ApprovalStatus::Pending);
 
         Ok(())
     }
@@ -336,7 +331,7 @@ mod tests {
     async fn repeated_approval_returns_conflict_without_duplicate_event() -> anyhow::Result<()> {
         let temp_dir = TempDir::new()?;
         let store = Store::new(temp_dir.path().to_path_buf())?;
-        let manager = SessionManager::new(store.clone());
+        let manager = test_manager(store.clone());
         let session = manager
             .start_session("workspace-1".to_string(), "Build feature".to_string())
             .await?;
@@ -373,7 +368,7 @@ mod tests {
     async fn concurrent_approval_allows_one_terminal_transition() -> anyhow::Result<()> {
         let temp_dir = TempDir::new()?;
         let store = Store::new(temp_dir.path().to_path_buf())?;
-        let manager = SessionManager::new(store.clone());
+        let manager = test_manager(store.clone());
         let session = manager
             .start_session("workspace-1".to_string(), "Build feature".to_string())
             .await?;

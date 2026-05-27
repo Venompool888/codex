@@ -1,4 +1,5 @@
 mod auth;
+pub(crate) mod backend;
 pub mod config;
 pub mod models;
 mod routes;

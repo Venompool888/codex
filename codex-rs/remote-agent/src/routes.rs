@@ -95,7 +95,10 @@ pub fn build_router(config: Config) -> Router {
     };
     let state = AppState {
         config,
-        sessions: SessionManager::new(store.clone()),
+        sessions: SessionManager::new(
+            store.clone(),
+            std::sync::Arc::new(crate::backend::demo::DemoBackend::new()),
+        ),
         store,
     };
     Router::new()
