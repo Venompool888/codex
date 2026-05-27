@@ -725,6 +725,11 @@ label {
     padding: 0 8px;
   }
 
+  .titlebar-center {
+    max-width: 112px;
+    text-align: left;
+  }
+
   .titlebar-actions {
     justify-content: flex-end;
   }
