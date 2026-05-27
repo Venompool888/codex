@@ -1,4 +1,5 @@
 pub mod demo;
+pub mod app_server;
 
 use std::future::Future;
 use std::pin::Pin;
