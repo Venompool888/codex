@@ -237,7 +237,9 @@ async fn serves_embedded_web_ui() {
     assert!(body.contains(r#"id="diffDrawer""#));
     assert!(body.contains(r#"id="commandPalette""#));
     assert!(body.contains(r#"id="infoPanel""#));
-    assert!(body.contains(r#"id="composerStatus""#));
+    assert!(body.contains(r#"id="messageForm""#));
+    assert!(body.contains(r#"id="messageInput""#));
+    assert!(body.contains(r#"Ask Codex"#));
     assert!(!body.contains(">File<"));
     assert!(!body.contains(">Edit<"));
     assert!(!body.contains(">View<"));

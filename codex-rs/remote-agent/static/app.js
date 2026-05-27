@@ -19,7 +19,6 @@ const state = {
   paletteOpen: false,
   infoOpen: false,
   mobileSidebarOpen: false,
-  composerNotice: "",
 };
 
 const elements = {
@@ -146,13 +145,13 @@ elements.sessionForm.addEventListener("submit", async (event) => {
   await createSession();
 });
 
-elements.messageForm.addEventListener("submit", (event) => {
+elements.messageForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  revealComposerStatus();
+  await submitMessage();
 });
 
-elements.messageInput.addEventListener("focus", () => {
-  revealComposerStatus();
+elements.messageInput.addEventListener("input", () => {
+  renderComposerState();
 });
 
 document.addEventListener("keydown", (event) => {
@@ -311,6 +310,50 @@ async function createSession() {
       return;
     }
     setConnection(error.message, "error");
+  }
+}
+
+async function submitMessage() {
+  const session = selectedSession();
+  const message = elements.messageInput.value.trim();
+  if (!session || !message || composerLocked()) {
+    renderComposerState();
+    return;
+  }
+
+  const token = state.token;
+  const sessionId = session.id;
+  elements.messageInput.disabled = true;
+  elements.messageSend.disabled = true;
+  elements.composerStatus.textContent = "Sending...";
+  try {
+    await apiJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+      {
+        method: "POST",
+        body: JSON.stringify({ message }),
+      },
+      token,
+    );
+    if (state.token !== token || state.selectedSessionId !== sessionId) {
+      return;
+    }
+    elements.messageInput.value = "";
+    const current = selectedSession();
+    if (current) {
+      current.status = "Running";
+    }
+    renderWorkspaces();
+    renderComposerState();
+  } catch (error) {
+    if (handleAuthError(error, token)) {
+      return;
+    }
+    if (state.token !== token || state.selectedSessionId !== sessionId) {
+      return;
+    }
+    appendStreamError(sessionId, error.message);
+    renderComposerState();
   }
 }
 
@@ -493,7 +536,6 @@ function clearSessionToken() {
   state.selectedSessionId = "";
   state.selectedHistory = [];
   state.selectedHistoryIndex = -1;
-  state.composerNotice = "";
   elements.sessionTitle.value = "";
   elements.messageInput.value = "";
   elements.activeSessionLabel.textContent = "No session selected";
@@ -539,7 +581,7 @@ function renderTitlebar() {
     ? `${workspace.displayName} · ${workspace.path}`
     : "No workspace selected";
   elements.sidebarSummary.textContent = state.token
-    ? `Deterministic backend · ${state.workspaces.length} workspaces`
+    ? `Codex app-server · ${state.workspaces.length} workspaces`
     : "Signed out";
   elements.backButton.disabled = state.selectedHistoryIndex <= 0;
   elements.forwardButton.disabled =
@@ -578,21 +620,36 @@ function setMobileSidebarOpen(open) {
 }
 
 function renderComposerState() {
-  elements.messageInput.disabled = true;
-  elements.messageSend.disabled = true;
-  elements.messageInput.placeholder = "Message unavailable";
-  elements.composerStatus.textContent =
-    state.composerNotice || "Message sending unavailable in deterministic backend.";
+  const session = selectedSession();
+  const message = elements.messageInput.value.trim();
+  const locked = composerLocked();
+  elements.messageInput.disabled = !state.token || !session || locked;
+  elements.messageSend.disabled = !state.token || !session || locked || !message;
+
+  if (!state.token) {
+    elements.messageInput.placeholder = "Sign in to start";
+    elements.composerStatus.textContent = "Setup required.";
+  } else if (!session) {
+    elements.messageInput.placeholder = "Select a session";
+    elements.composerStatus.textContent = "Create or select a session to message Codex.";
+  } else if (session.status === "Running") {
+    elements.messageInput.placeholder = "Codex is working";
+    elements.composerStatus.textContent = "Codex is working...";
+  } else if (session.status === "WaitingForApproval") {
+    elements.messageInput.placeholder = "Approval required";
+    elements.composerStatus.textContent = "Resolve the approval request to continue.";
+  } else {
+    elements.messageInput.placeholder = "Ask Codex to change this workspace...";
+    elements.composerStatus.textContent = "Ready.";
+  }
 }
 
-function revealComposerStatus() {
-  state.composerNotice =
-    "The current deterministic backend can stream sessions, approvals, and diffs, but it cannot accept chat messages.";
-  renderComposerState();
-  elements.composerStatus.classList.add("attention");
-  setTimeout(() => {
-    elements.composerStatus.classList.remove("attention");
-  }, 1200);
+function composerLocked() {
+  const session = selectedSession();
+  return Boolean(
+    session &&
+      (session.status === "Running" || session.status === "WaitingForApproval"),
+  );
 }
 
 function renderWorkspaces() {
@@ -900,16 +957,36 @@ function appendSessionEvent(event, sessionId) {
 }
 
 function updateSessionStateFromEvent(event) {
-  if (event.kind.type !== "approvalDecided") {
-    return;
-  }
   const session = state.sessions.find((item) => item.id === event.sessionId);
   if (!session) {
     return;
   }
-  session.status = event.kind.approved ? "Completed" : "Failed";
-  session.updatedAt = event.createdAt;
+  switch (event.kind.type) {
+    case "approvalRequested":
+      session.status = "WaitingForApproval";
+      break;
+    case "approvalDecided":
+      session.status = event.kind.approved ? "Running" : "Failed";
+      break;
+    case "errorRaised":
+      session.status = "Failed";
+      break;
+    case "statusText":
+      if (event.kind.status === "Session completed.") {
+        session.status = "Completed";
+      } else if (
+        event.kind.status === "Codex is working." ||
+        event.kind.status === "Codex turn started."
+      ) {
+        session.status = "Running";
+      }
+      break;
+    default:
+      return;
+  }
+  session.updatedAt = event.createdAt || session.updatedAt;
   renderWorkspaces();
+  renderComposerState();
   renderTitlebar();
 }
 
@@ -990,11 +1067,6 @@ function paletteItems() {
       detail: "Show current agent, workspace, and session details",
       run: () => setInfoOpen(true),
     },
-    {
-      label: "Reveal composer status",
-      detail: "Explain why message sending is disabled",
-      run: () => revealComposerStatus(),
-    },
   ];
   if (workspaceAvailable(state.selectedWorkspaceId)) {
     actions.unshift({
@@ -1070,7 +1142,7 @@ function renderInfoPanel() {
   const session = selectedSession();
   const rows = [
     ["Connection", state.token ? "Connected" : "Signed out"],
-    ["Backend", "Deterministic"],
+    ["Backend", "Codex app-server"],
     ["Workspaces", String(state.workspaces.length)],
     ["Workspace", workspace ? workspace.displayName : "None"],
     ["Workspace path", workspace ? workspace.path : "None"],
