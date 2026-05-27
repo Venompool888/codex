@@ -8,6 +8,8 @@ use anyhow::Context;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::backend::BackendEvent;
+use crate::backend::BackendEventSink;
 use crate::backend::CodexBackend;
 use crate::Store;
 use crate::models::ApprovalStatus;
@@ -38,6 +40,20 @@ pub(crate) enum ApproveError {
     MissingSession,
     #[error("approval already completed")]
     AlreadyCompleted,
+    #[error(transparent)]
+    Store(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SubmitMessageError {
+    #[error("session not found")]
+    SessionNotFound,
+    #[error("session is missing backend thread")]
+    MissingThread,
+    #[error("turn is already active")]
+    TurnAlreadyActive,
+    #[error("message is empty")]
+    EmptyMessage,
     #[error(transparent)]
     Store(#[from] anyhow::Error),
 }
@@ -165,6 +181,109 @@ impl SessionManager {
         self.store.events(session_id).await
     }
 
+    pub(crate) async fn submit_message(
+        &self,
+        session_id: &str,
+        message: String,
+    ) -> Result<(), SubmitMessageError> {
+        let message = message.trim().to_string();
+        if message.is_empty() {
+            return Err(SubmitMessageError::EmptyMessage);
+        }
+        let Some(mut session) = self
+            .store
+            .sessions()
+            .await?
+            .into_iter()
+            .find(|item| item.id == session_id)
+        else {
+            return Err(SubmitMessageError::SessionNotFound);
+        };
+        let Some(metadata) = self.store.session_metadata(session_id).await? else {
+            return Err(SubmitMessageError::MissingThread);
+        };
+        if metadata.active_turn_id.is_some() {
+            return Err(SubmitMessageError::TurnAlreadyActive);
+        }
+        let Some(thread_id) = metadata.app_server_thread_id else {
+            return Err(SubmitMessageError::MissingThread);
+        };
+
+        let now = unix_timestamp()?;
+        session.status = SessionStatus::Running;
+        session.updated_at = now;
+        self.store.upsert_session(session.clone()).await?;
+        self.store
+            .upsert_session_metadata(SessionMetadata {
+                session_id: session.id.clone(),
+                app_server_thread_id: Some(thread_id.clone()),
+                active_turn_id: Some("starting".to_string()),
+            })
+            .await?;
+        let events = vec![
+            SessionEvent {
+                id: new_id(),
+                session_id: session.id.clone(),
+                created_at: now,
+                kind: SessionEventKind::MessageDelta {
+                    role: "user".to_string(),
+                    content: message.clone(),
+                },
+            },
+            SessionEvent {
+                id: new_id(),
+                session_id: session.id.clone(),
+                created_at: now,
+                kind: SessionEventKind::StatusText {
+                    status: "Codex is working.".to_string(),
+                },
+            },
+        ];
+        for event in events.clone() {
+            self.store.append_event(event).await?;
+        }
+        self.broadcast_events(events);
+
+        let sink = Arc::new(StoreEventSink {
+            manager: SessionManagerSink {
+                store: self.store.clone(),
+                senders: self.senders.clone(),
+            },
+        });
+        let turn = self
+            .backend
+            .submit_turn(
+                session.id.clone(),
+                thread_id.clone(),
+                session.workspace_id.clone(),
+                message,
+                sink,
+            )
+            .await
+            .map_err(SubmitMessageError::Store)?;
+        self.store
+            .upsert_session_metadata(SessionMetadata {
+                session_id: session.id,
+                app_server_thread_id: Some(thread_id),
+                active_turn_id: Some(turn.turn_id),
+            })
+            .await?;
+        if let Some(current) = self
+            .store
+            .sessions()
+            .await?
+            .into_iter()
+            .find(|item| item.id == session_id)
+            && matches!(
+                current.status,
+                SessionStatus::Completed | SessionStatus::Failed
+            )
+        {
+            self.store.clear_active_turn(session_id).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn session_exists(&self, session_id: &str) -> anyhow::Result<bool> {
         Ok(self
             .store
@@ -231,6 +350,101 @@ impl SessionManager {
             let sender = self.sender(&event.session_id);
             let _ = sender.send(event);
         }
+    }
+
+    fn sender(&self, session_id: &str) -> broadcast::Sender<SessionEvent> {
+        let mut senders = self
+            .senders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        senders
+            .entry(session_id.to_string())
+            .or_insert_with(|| {
+                let (sender, _receiver) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+                sender
+            })
+            .clone()
+    }
+}
+
+#[derive(Clone)]
+struct StoreEventSink {
+    manager: SessionManagerSink,
+}
+
+#[derive(Clone)]
+struct SessionManagerSink {
+    store: Store,
+    senders: Arc<Mutex<HashMap<String, broadcast::Sender<SessionEvent>>>>,
+}
+
+impl BackendEventSink for StoreEventSink {
+    fn emit(
+        &self,
+        session_id: String,
+        event: BackendEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move { self.manager.record_backend_event(&session_id, event).await })
+    }
+}
+
+impl SessionManagerSink {
+    async fn record_backend_event(
+        &self,
+        session_id: &str,
+        backend_event: BackendEvent,
+    ) -> anyhow::Result<()> {
+        let now = unix_timestamp()?;
+        let (status, kind) = match backend_event {
+            BackendEvent::AssistantDelta(content) => (
+                None,
+                SessionEventKind::MessageDelta {
+                    role: "assistant".to_string(),
+                    content,
+                },
+            ),
+            BackendEvent::Status(status) => (None, SessionEventKind::StatusText { status }),
+            BackendEvent::ToolStarted { command } => {
+                (None, SessionEventKind::ToolCallStarted { command })
+            }
+            BackendEvent::ToolCompleted { exit_code } => {
+                (None, SessionEventKind::ToolCallCompleted { exit_code })
+            }
+            BackendEvent::DiffUpdated => (None, SessionEventKind::DiffUpdated),
+            BackendEvent::Completed => (
+                Some(SessionStatus::Completed),
+                SessionEventKind::StatusText {
+                    status: COMPLETED_STATUS_TEXT.to_string(),
+                },
+            ),
+            BackendEvent::Failed { message } => {
+                (Some(SessionStatus::Failed), SessionEventKind::ErrorRaised { message })
+            }
+        };
+        let event = SessionEvent {
+            id: new_id(),
+            session_id: session_id.to_string(),
+            created_at: now,
+            kind,
+        };
+        self.store.append_event(event.clone()).await?;
+        if let Some(status) = status {
+            self.store.clear_active_turn(session_id).await?;
+            if let Some(mut session) = self
+                .store
+                .sessions()
+                .await?
+                .into_iter()
+                .find(|item| item.id == session_id)
+            {
+                session.status = status;
+                session.updated_at = now;
+                self.store.upsert_session(session).await?;
+            }
+        }
+        let sender = self.sender(session_id);
+        let _ = sender.send(event);
+        Ok(())
     }
 
     fn sender(&self, session_id: &str) -> broadcast::Sender<SessionEvent> {
@@ -324,6 +538,74 @@ mod tests {
             ]
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_message_records_user_message_and_backend_events() -> anyhow::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Store::new(temp_dir.path().to_path_buf())?;
+        let manager = test_manager(store.clone());
+        let session = manager
+            .start_session("workspace-1".to_string(), "Build feature".to_string())
+            .await?;
+
+        manager
+            .submit_message(&session.id, "Run tests".to_string())
+            .await?;
+
+        assert_eq!(
+            store.session_metadata(&session.id).await?.unwrap().active_turn_id,
+            None
+        );
+        assert_eq!(store.sessions().await?[0].status, SessionStatus::Completed);
+        assert_eq!(
+            store
+                .events(&session.id)
+                .await?
+                .into_iter()
+                .map(|event| event.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                SessionEventKind::SessionCreated,
+                SessionEventKind::StatusText {
+                    status: "Ready.".to_string(),
+                },
+                SessionEventKind::MessageDelta {
+                    role: "assistant".to_string(),
+                    content: "Remote Codex session ready.".to_string(),
+                },
+                SessionEventKind::MessageDelta {
+                    role: "user".to_string(),
+                    content: "Run tests".to_string(),
+                },
+                SessionEventKind::StatusText {
+                    status: "Codex is working.".to_string(),
+                },
+                SessionEventKind::MessageDelta {
+                    role: "assistant".to_string(),
+                    content: "Demo backend received: Run tests".to_string(),
+                },
+                SessionEventKind::StatusText {
+                    status: "Session completed.".to_string(),
+                },
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_message_rejects_missing_session() -> anyhow::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Store::new(temp_dir.path().to_path_buf())?;
+        let manager = test_manager(store);
+
+        let result = manager
+            .submit_message("missing-session", "Run tests".to_string())
+            .await;
+
+        assert!(matches!(result, Err(SubmitMessageError::SessionNotFound)));
         Ok(())
     }
 
