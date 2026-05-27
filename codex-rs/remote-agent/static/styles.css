@@ -1,22 +1,29 @@
 :root {
   color-scheme: dark;
-  --bg: #090909;
-  --titlebar: #111111;
-  --sidebar: #171717;
-  --surface: #202020;
-  --surface-raised: #262626;
-  --drawer: #181818;
-  --border: #343434;
-  --border-soft: #292929;
-  --text: #f2f2f2;
-  --muted: #a7a7a7;
-  --muted-2: #777777;
-  --accent: #f2a365;
-  --accent-blue: #78a6ff;
-  --danger: #ff7777;
-  --success: #8bd38b;
-  --warning: #f2c66d;
-  --code-bg: #303030;
+  --bg: #050505;
+  --window: #0d0d0e;
+  --titlebar: #111113;
+  --sidebar: #151516;
+  --surface: #1b1b1d;
+  --surface-soft: #202023;
+  --surface-raised: #28282b;
+  --drawer: #131315;
+  --modal: #202024;
+  --border: rgb(255 255 255 / 0.105);
+  --border-soft: rgb(255 255 255 / 0.065);
+  --border-strong: rgb(255 255 255 / 0.16);
+  --text: #f4f1ec;
+  --muted: #aaa7a1;
+  --muted-2: #7f7b75;
+  --accent: #f0a15f;
+  --accent-blue: #8fb4ff;
+  --danger: #ff8a82;
+  --success: #9adb95;
+  --warning: #f3c96b;
+  --code-bg: #303034;
+  --shadow-soft: 0 18px 60px rgb(0 0 0 / 0.34);
+  --shadow-inset: inset 0 1px 0 rgb(255 255 255 / 0.04);
+  --focus-ring: 0 0 0 3px rgb(143 180 255 / 0.22);
 }
 
 * {
@@ -43,44 +50,47 @@ input {
 }
 
 button {
-  min-height: 32px;
+  min-height: 34px;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface-raised);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.055), rgb(255 255 255 / 0.025));
+  box-shadow: var(--shadow-inset);
   color: var(--text);
-  padding: 0 12px;
+  padding: 0 13px;
   cursor: pointer;
 }
 
 button:hover:not(:disabled) {
-  border-color: #4a4a4a;
-  background: #303030;
+  border-color: var(--border-strong);
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.085), rgb(255 255 255 / 0.04));
 }
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.45;
+  opacity: 0.46;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 0;
+  box-shadow: var(--focus-ring), var(--shadow-inset);
 }
 
 input {
   min-width: 0;
-  min-height: 36px;
+  min-height: 38px;
   width: 100%;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #121212;
+  border-radius: 8px;
+  background: rgb(0 0 0 / 0.22);
   color: var(--text);
-  padding: 8px 10px;
-}
-
-input:focus {
-  outline: 2px solid rgb(120 166 255 / 0.24);
-  border-color: var(--accent-blue);
+  padding: 9px 12px;
 }
 
 .desktop-shell {
   min-height: 100vh;
   overflow: hidden;
+  background: linear-gradient(180deg, #080809 0%, var(--bg) 46px, var(--bg) 100%);
 }
 
 .setup-gate {
@@ -96,7 +106,8 @@ input:focus {
   width: min(520px, 100%);
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--surface);
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.07), rgb(255 255 255 / 0.035)), var(--modal);
+  box-shadow: var(--shadow-soft), var(--shadow-inset);
   padding: 20px;
 }
 
@@ -112,8 +123,9 @@ input:focus {
 
 .app-frame {
   display: grid;
-  grid-template-rows: 44px minmax(0, 1fr);
+  grid-template-rows: 46px minmax(0, 1fr);
   height: 100vh;
+  background: var(--window);
 }
 
 .desktop-titlebar {
@@ -122,7 +134,8 @@ input:focus {
   align-items: center;
   gap: 12px;
   border-bottom: 1px solid var(--border-soft);
-  background: var(--titlebar);
+  background: linear-gradient(180deg, #151517, var(--titlebar));
+  box-shadow: var(--shadow-inset);
   padding: 0 12px;
 }
 
@@ -152,7 +165,6 @@ input:focus {
 
 .titlebar-controls,
 .titlebar-actions,
-.sidebar-actions,
 .approval-actions {
   display: flex;
   align-items: center;
@@ -186,7 +198,7 @@ input:focus {
 }
 
 .titlebar-title {
-  font-weight: 650;
+  font-weight: 680;
 }
 
 .titlebar-subtitle,
@@ -217,28 +229,32 @@ input:focus {
 
 .desktop-body {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: 298px minmax(0, 1fr);
   min-height: 0;
+  background: var(--window);
 }
 
 .desktop-shell.diff-open .desktop-body {
-  grid-template-columns: 300px minmax(0, 1fr) minmax(320px, 420px);
+  grid-template-columns: 298px minmax(0, 1fr) minmax(340px, 430px);
 }
 
-.workspace-sidebar,
-.diff-drawer {
+.workspace-sidebar {
   min-width: 0;
   border-right: 1px solid var(--border-soft);
-  background: var(--sidebar);
+  background: linear-gradient(180deg, #19191b, var(--sidebar));
+  box-shadow: inset -1px 0 0 rgb(0 0 0 / 0.26), var(--shadow-inset);
   overflow: auto;
-  padding: 14px;
+  padding: 16px 14px;
 }
 
 .diff-drawer {
   display: none;
-  border-right: 0;
+  min-width: 0;
   border-left: 1px solid var(--border-soft);
-  background: var(--drawer);
+  background: linear-gradient(180deg, #171719, var(--drawer));
+  box-shadow: inset 1px 0 0 rgb(255 255 255 / 0.025);
+  overflow: auto;
+  padding: 16px;
 }
 
 .desktop-shell.diff-open .diff-drawer {
@@ -287,6 +303,13 @@ h2 {
   margin-top: 14px;
 }
 
+.sidebar-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
 .connection-details-button,
 .sidebar-actions button {
   width: 100%;
@@ -314,18 +337,18 @@ h2 {
 label {
   color: var(--muted);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 650;
 }
 
 .project-list {
   display: grid;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 9px;
+  margin-top: 9px;
 }
 
 .project-group {
   display: grid;
-  gap: 4px;
+  gap: 5px;
 }
 
 .project-header,
@@ -335,11 +358,24 @@ label {
   text-align: left;
 }
 
+.project-header,
+.thread-row {
+  border-radius: 8px;
+  box-shadow: var(--shadow-inset);
+}
+
 .project-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 4px 8px;
-  min-height: 44px;
+  min-height: 48px;
+  background: rgb(255 255 255 / 0.035);
+}
+
+.project-group.active .project-header,
+.thread-row.active {
+  border-color: rgb(240 161 95 / 0.28);
+  background: linear-gradient(180deg, rgb(240 161 95 / 0.13), rgb(255 255 255 / 0.045));
 }
 
 .project-meta {
@@ -349,21 +385,17 @@ label {
 
 .thread-list {
   display: grid;
-  gap: 2px;
-  padding-left: 10px;
+  gap: 3px;
+  padding-left: 9px;
 }
 
 .thread-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
+  min-height: 34px;
   border-color: transparent;
   background: transparent;
-}
-
-.thread-row.active {
-  background: #2f2f2f;
-  border-color: #414141;
 }
 
 .thread-empty {
@@ -373,12 +405,13 @@ label {
 }
 
 .status-pill {
+  border: 1px solid rgb(255 255 255 / 0.07);
   border-radius: 999px;
-  background: var(--code-bg);
+  background: rgb(0 0 0 / 0.22);
   color: var(--muted);
   padding: 2px 7px;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 700;
   white-space: nowrap;
 }
 
@@ -396,28 +429,41 @@ label {
   color: var(--danger);
 }
 
+.connection-details-button {
+  border-color: transparent;
+  background: rgb(255 255 255 / 0.035);
+}
+
 .session-surface {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
-  background: var(--surface);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.018), transparent 120px),
+    var(--surface);
 }
 
 .session-scroll {
   min-height: 0;
   overflow: auto;
-  padding: 28px min(8vw, 96px);
+  padding: 30px clamp(18px, 7vw, 104px) 22px;
 }
 
 .chat-row,
 .action-block {
-  width: min(780px, 100%);
+  width: min(760px, 100%);
   margin: 0 auto 14px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
-  background: #242424;
-  padding: 12px;
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.045), rgb(255 255 255 / 0.025));
+  box-shadow: var(--shadow-inset);
+  padding: 14px;
+}
+
+.action-block {
+  border-color: rgb(240 161 95 / 0.18);
+  background: linear-gradient(180deg, rgb(240 161 95 / 0.10), rgb(255 255 255 / 0.028));
 }
 
 .chat-role,
@@ -425,12 +471,12 @@ label {
   margin-bottom: 6px;
   color: var(--muted);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 750;
   text-transform: uppercase;
 }
 
 .chat-row.error {
-  border-color: rgb(255 119 119 / 0.35);
+  border-color: rgb(255 138 130 / 0.35);
 }
 
 .chat-text,
@@ -440,8 +486,8 @@ label {
 }
 
 .timeline-separator {
-  width: min(780px, 100%);
-  margin: 12px auto;
+  width: min(760px, 100%);
+  margin: 14px auto;
   color: var(--muted-2);
   font-size: 12px;
   text-align: center;
@@ -451,13 +497,31 @@ label {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
-  border-top: 1px solid var(--border-soft);
-  background: #1b1b1b;
-  padding: 12px min(8vw, 96px);
+  width: min(760px, calc(100% - 32px));
+  margin: 0 auto 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.06), rgb(255 255 255 / 0.03));
+  box-shadow: 0 12px 34px rgb(0 0 0 / 0.22), var(--shadow-inset);
+  padding: 10px;
+}
+
+.composer input {
+  min-height: 40px;
+  border-color: transparent;
+  background: transparent;
+  padding: 8px 2px;
+}
+
+.composer button {
+  min-width: 62px;
 }
 
 .composer-status {
   grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 2px 2px;
 }
 
 .composer-status.attention {
@@ -470,25 +534,40 @@ label {
 }
 
 .approval-button.approve {
-  border-color: rgb(139 211 139 / 0.35);
+  border-color: rgb(154 219 149 / 0.35);
   color: var(--success);
 }
 
 .approval-button.deny {
-  border-color: rgb(255 119 119 / 0.35);
+  border-color: rgb(255 138 130 / 0.35);
   color: var(--danger);
 }
 
 .approval-result {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.055);
   color: var(--muted);
+  padding: 0 10px;
   font-size: 12px;
   font-weight: 700;
+}
+
+.drawer-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  align-items: flex-start;
+  padding-bottom: 12px;
+  background: linear-gradient(180deg, var(--drawer) 72%, transparent);
 }
 
 .diff-panel {
   display: grid;
   gap: 8px;
-  margin-top: 14px;
+  margin-top: 4px;
 }
 
 .diff-file {
@@ -496,7 +575,7 @@ label {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   border-bottom: 1px solid var(--border-soft);
-  padding: 8px 0;
+  padding: 10px 0;
 }
 
 .diff-file:last-child {
@@ -505,12 +584,13 @@ label {
 
 .command,
 .diff-path {
-  border-radius: 4px;
+  border: 1px solid rgb(255 255 255 / 0.06);
+  border-radius: 8px;
   background: var(--code-bg);
   color: var(--text);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
-  padding: 2px 5px;
+  padding: 3px 7px;
 }
 
 .command-palette,
@@ -520,13 +600,14 @@ label {
   z-index: 20;
   display: grid;
   place-items: start center;
-  background: rgb(0 0 0 / 0.58);
+  background: rgb(0 0 0 / 0.62);
+  backdrop-filter: blur(10px);
   padding: 12vh 20px 20px;
 }
 
 .palette-results {
   display: grid;
-  gap: 4px;
+  gap: 5px;
   max-height: 54vh;
   margin-top: 10px;
   overflow: auto;
@@ -535,10 +616,14 @@ label {
 .palette-item {
   display: grid;
   gap: 2px;
+  border-radius: 8px;
+  background: transparent;
 }
 
-.palette-item.active {
-  border-color: var(--accent-blue);
+.palette-item.active,
+.palette-item:hover {
+  border-color: rgb(143 180 255 / 0.32);
+  background: rgb(143 180 255 / 0.10);
 }
 
 .palette-label {
@@ -548,8 +633,10 @@ label {
 .info-details {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 8px 14px;
+  gap: 10px 14px;
   margin: 16px 0 0;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 14px;
 }
 
 .info-details dt {
@@ -588,10 +675,12 @@ label {
 
   .workspace-sidebar {
     position: fixed;
-    inset: 44px auto 0 0;
+    inset: 52px auto 10px 10px;
     z-index: 15;
-    width: min(86vw, 340px);
-    transform: translateX(-100%);
+    width: min(88vw, 360px);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    transform: translateX(calc(-100% - 20px));
     transition: transform 160ms ease;
   }
 
@@ -601,9 +690,11 @@ label {
 
   .diff-drawer {
     position: fixed;
-    inset: 44px 0 0;
+    inset: 52px 10px 10px;
     z-index: 16;
     display: none;
+    border: 1px solid var(--border);
+    border-radius: 8px;
   }
 
   .desktop-shell.diff-open .diff-drawer {
@@ -611,7 +702,7 @@ label {
   }
 
   .session-scroll {
-    padding: 20px 14px;
+    padding: 22px 14px;
   }
 
   .composer,
