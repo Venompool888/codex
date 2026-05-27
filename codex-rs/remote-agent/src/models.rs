@@ -26,6 +26,14 @@ pub struct Session {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SessionMetadata {
+    pub session_id: String,
+    pub app_server_thread_id: Option<String>,
+    pub active_turn_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SessionStatus {
     Running,
     WaitingForApproval,

@@ -15,6 +15,7 @@ use crate::models::ApprovalRequest;
 use crate::models::ApprovalStatus;
 use crate::models::Session;
 use crate::models::SessionEvent;
+use crate::models::SessionMetadata;
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const LOCK_RETRY_COUNT: usize = 100;
@@ -78,6 +79,8 @@ struct AgentStateFile {
     sessions: Vec<Session>,
     events: Vec<SessionEvent>,
     approvals: Vec<ApprovalRequest>,
+    #[serde(default)]
+    session_metadata: Vec<SessionMetadata>,
 }
 
 impl Store {
@@ -145,6 +148,62 @@ impl Store {
             *existing = session;
         } else {
             state.sessions.push(session);
+        }
+        self.save_agent_state_locked(&state).await
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "store operations intentionally serialize async file access"
+    )]
+    pub async fn session_metadata(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Option<SessionMetadata>> {
+        let _guard = self.mutex.lock().await;
+        let _file_guard = self.lock_agent_state().await?;
+        Ok(self
+            .load_agent_state_locked()
+            .await?
+            .session_metadata
+            .into_iter()
+            .find(|metadata| metadata.session_id == session_id))
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "store operations intentionally serialize async file access"
+    )]
+    pub async fn upsert_session_metadata(&self, metadata: SessionMetadata) -> anyhow::Result<()> {
+        let _guard = self.mutex.lock().await;
+        let _file_guard = self.lock_agent_state().await?;
+        let mut state = self.load_agent_state_locked().await?;
+        if let Some(existing) = state
+            .session_metadata
+            .iter_mut()
+            .find(|item| item.session_id == metadata.session_id)
+        {
+            *existing = metadata;
+        } else {
+            state.session_metadata.push(metadata);
+        }
+        self.save_agent_state_locked(&state).await
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "store operations intentionally serialize async file access"
+    )]
+    pub async fn clear_active_turn(&self, session_id: &str) -> anyhow::Result<()> {
+        let _guard = self.mutex.lock().await;
+        let _file_guard = self.lock_agent_state().await?;
+        let mut state = self.load_agent_state_locked().await?;
+        if let Some(metadata) = state
+            .session_metadata
+            .iter_mut()
+            .find(|item| item.session_id == session_id)
+        {
+            metadata.active_turn_id = None;
         }
         self.save_agent_state_locked(&state).await
     }
@@ -315,6 +374,7 @@ impl Store {
             sessions: sessions_file.sessions,
             events: events_file.events,
             approvals: approvals_file.approvals,
+            session_metadata: Vec::new(),
         })
     }
 
@@ -802,6 +862,7 @@ mod tests {
                 sessions: vec![state_session.clone()],
                 events: Vec::new(),
                 approvals: Vec::new(),
+                session_metadata: Vec::new(),
             },
         )
         .await
@@ -1027,6 +1088,43 @@ mod tests {
         store.upsert_session(replacement.clone()).await.unwrap();
 
         assert_eq!(store.sessions().await.unwrap(), vec![replacement]);
+    }
+
+    #[tokio::test]
+    async fn session_metadata_round_trips_thread_and_active_turn() -> anyhow::Result<()> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let store = Store::new(temp_dir.path().to_path_buf())?;
+        let session_id = "session-1";
+
+        store
+            .upsert_session_metadata(crate::models::SessionMetadata {
+                session_id: session_id.to_string(),
+                app_server_thread_id: Some("thr_123".to_string()),
+                active_turn_id: Some("turn_456".to_string()),
+            })
+            .await?;
+
+        assert_eq!(
+            store.session_metadata(session_id).await?,
+            Some(crate::models::SessionMetadata {
+                session_id: session_id.to_string(),
+                app_server_thread_id: Some("thr_123".to_string()),
+                active_turn_id: Some("turn_456".to_string()),
+            })
+        );
+
+        store.clear_active_turn(session_id).await?;
+
+        assert_eq!(
+            store.session_metadata(session_id).await?,
+            Some(crate::models::SessionMetadata {
+                session_id: session_id.to_string(),
+                app_server_thread_id: Some("thr_123".to_string()),
+                active_turn_id: None,
+            })
+        );
+
+        Ok(())
     }
 
     #[tokio::test]
