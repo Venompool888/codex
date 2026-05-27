@@ -890,12 +890,27 @@ async function submitApproval(approvalId, approved) {
 
 function appendSessionEvent(event, sessionId) {
   updateApprovalState(event.kind);
+  updateSessionStateFromEvent(event);
   state.events.push(event);
   trimEvents();
   renderEvents();
   if (event.kind.type === "diffUpdated") {
     refreshSessionDiff(sessionId);
   }
+}
+
+function updateSessionStateFromEvent(event) {
+  if (event.kind.type !== "approvalDecided") {
+    return;
+  }
+  const session = state.sessions.find((item) => item.id === event.sessionId);
+  if (!session) {
+    return;
+  }
+  session.status = event.kind.approved ? "Completed" : "Failed";
+  session.updatedAt = event.createdAt;
+  renderWorkspaces();
+  renderTitlebar();
 }
 
 function appendStreamError(sessionId, message) {
