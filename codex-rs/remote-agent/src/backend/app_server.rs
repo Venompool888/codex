@@ -62,6 +62,70 @@ pub(crate) fn turn_start_params(thread_id: &str, cwd: &str, message: &str) -> Va
     })
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MappedNotification {
+    pub(crate) thread_id: String,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) event: BackendEvent,
+}
+
+pub(crate) fn map_notification(value: &Value) -> Option<MappedNotification> {
+    let method = value.get("method")?.as_str()?;
+    let params = value.get("params")?;
+    match method {
+        "item/agentMessage/delta" => Some(MappedNotification {
+            thread_id: params.get("threadId")?.as_str()?.to_string(),
+            turn_id: params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            event: BackendEvent::AssistantDelta(params.get("delta")?.as_str()?.to_string()),
+        }),
+        "turn/started" => Some(MappedNotification {
+            thread_id: params.get("threadId")?.as_str()?.to_string(),
+            turn_id: params
+                .pointer("/turn/id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            event: BackendEvent::Status("Codex is working.".to_string()),
+        }),
+        "turn/completed" => {
+            let status = params.pointer("/turn/status")?.as_str()?;
+            let event = match status {
+                "completed" => BackendEvent::Completed,
+                "interrupted" => BackendEvent::Failed {
+                    message: "Turn interrupted.".to_string(),
+                },
+                "failed" => BackendEvent::Failed {
+                    message: params
+                        .pointer("/turn/error/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Codex turn failed.")
+                        .to_string(),
+                },
+                _ => return None,
+            };
+            Some(MappedNotification {
+                thread_id: params.get("threadId")?.as_str()?.to_string(),
+                turn_id: params
+                    .pointer("/turn/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                event,
+            })
+        }
+        "turn/diff/updated" => Some(MappedNotification {
+            thread_id: params.get("threadId")?.as_str()?.to_string(),
+            turn_id: params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            event: BackendEvent::DiffUpdated,
+        }),
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AppServerBackend {
     inner: Arc<AppServerInner>,
@@ -156,7 +220,7 @@ impl Clone for AppServerConnection {
 fn spawn_reader(
     stdout: tokio::process::ChildStdout,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<anyhow::Result<Value>>>>>,
-    _thread_sessions: Arc<Mutex<HashMap<String, ThreadBinding>>>,
+    thread_sessions: Arc<Mutex<HashMap<String, ThreadBinding>>>,
 ) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -165,6 +229,16 @@ fn spawn_reader(
                 continue;
             };
             let Some(id) = value.get("id").and_then(Value::as_u64) else {
+                if let Some(mapped) = map_notification(&value) {
+                    let binding = thread_sessions
+                        .lock()
+                        .await
+                        .get(&mapped.thread_id)
+                        .cloned();
+                    if let Some(binding) = binding {
+                        let _ = binding.sink.emit(binding.session_id, mapped.event).await;
+                    }
+                }
                 continue;
             };
             let Some(sender) = pending.lock().await.remove(&id) else {
@@ -253,12 +327,24 @@ impl CodexBackend for AppServerBackend {
         Box<dyn std::future::Future<Output = anyhow::Result<BackendTurn>> + Send + '_>,
     > {
         Box::pin(async move {
+            let connection = self.ensure_connection().await?;
+            connection.thread_sessions.lock().await.insert(
+                thread_id.clone(),
+                ThreadBinding {
+                    session_id: session_id.clone(),
+                    sink: sink.clone(),
+                },
+            );
             let result = self
                 .request(
                     "turn/start",
                     turn_start_params(&thread_id, &workspace_path, &message),
                 )
-                .await?;
+                .await;
+            if result.is_err() {
+                connection.thread_sessions.lock().await.remove(&thread_id);
+            }
+            let result = result?;
             let turn_id = result
                 .pointer("/turn/id")
                 .and_then(Value::as_str)
@@ -339,6 +425,76 @@ mod tests {
                     ],
                     "cwd": "/srv/app"
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn maps_agent_message_delta_notification() {
+        assert_eq!(
+            map_notification(&json!({
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": "thr_123",
+                    "turnId": "turn_456",
+                    "itemId": "item_1",
+                    "delta": "hello"
+                }
+            })),
+            Some(MappedNotification {
+                thread_id: "thr_123".to_string(),
+                turn_id: Some("turn_456".to_string()),
+                event: BackendEvent::AssistantDelta("hello".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn maps_completed_turn_notification() {
+        assert_eq!(
+            map_notification(&json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thr_123",
+                    "turn": {
+                        "id": "turn_456",
+                        "status": "completed",
+                        "items": [],
+                        "error": null
+                    }
+                }
+            })),
+            Some(MappedNotification {
+                thread_id: "thr_123".to_string(),
+                turn_id: Some("turn_456".to_string()),
+                event: BackendEvent::Completed,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_failed_turn_notification() {
+        assert_eq!(
+            map_notification(&json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thr_123",
+                    "turn": {
+                        "id": "turn_456",
+                        "status": "failed",
+                        "items": [],
+                        "error": {
+                            "message": "quota exceeded"
+                        }
+                    }
+                }
+            })),
+            Some(MappedNotification {
+                thread_id: "thr_123".to_string(),
+                turn_id: Some("turn_456".to_string()),
+                event: BackendEvent::Failed {
+                    message: "quota exceeded".to_string(),
+                },
             })
         );
     }
