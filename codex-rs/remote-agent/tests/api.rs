@@ -608,7 +608,7 @@ async fn protected_endpoint_accepts_setup_session_token() {
 }
 
 #[tokio::test]
-async fn create_session_returns_waiting_for_approval_session() {
+async fn create_session_returns_ready_session() {
     let temp_dir = TempDir::new().unwrap();
     let repo = temp_dir.path().join("repo");
     tokio::fs::create_dir_all(&repo).await.unwrap();
@@ -630,7 +630,7 @@ async fn create_session_returns_waiting_for_approval_session() {
 
     assert_eq!(body_json["workspaceId"], workspace_id);
     assert_eq!(body_json["title"], "Build feature");
-    assert_eq!(body_json["status"], "waitingForApproval");
+    assert_eq!(body_json["status"], "completed");
     assert!(body_json["id"].as_str().is_some());
 }
 
@@ -721,6 +721,55 @@ async fn sessions_list_includes_created_session() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response_json(response).await, json!([created]));
+}
+
+#[tokio::test]
+async fn submit_message_requires_non_empty_message() {
+    let temp_dir = TempDir::new().unwrap();
+    let app = session_test_app(&temp_dir).await;
+    let session_token = setup_and_extract_token(app.clone()).await;
+    let session = create_session(app.clone(), &session_token).await;
+    let session_id = session["id"].as_str().unwrap();
+
+    let response = post_json_with_token(
+        app,
+        &format!("/api/sessions/{session_id}/messages"),
+        &session_token,
+        json!({"message":"   "}),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn submit_message_records_user_message() {
+    let temp_dir = TempDir::new().unwrap();
+    let app = session_test_app(&temp_dir).await;
+    let session_token = setup_and_extract_token(app.clone()).await;
+    let session = create_session(app.clone(), &session_token).await;
+    let session_id = session["id"].as_str().unwrap();
+
+    let response = post_json_with_token(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/messages"),
+        &session_token,
+        json!({"message":"Run tests"}),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_json(response).await, json!({"accepted":true}));
+
+    let store = Store::new(temp_dir.path().join("state")).unwrap();
+    let events = store.events(session_id).await.unwrap();
+    assert!(events.iter().any(|event| {
+        event.kind
+            == SessionEventKind::MessageDelta {
+                role: "user".to_string(),
+                content: "Run tests".to_string(),
+            }
+    }));
 }
 
 #[tokio::test]
