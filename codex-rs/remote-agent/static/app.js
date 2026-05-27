@@ -580,7 +580,7 @@ function setMobileSidebarOpen(open) {
 function renderComposerState() {
   elements.messageInput.disabled = true;
   elements.messageSend.disabled = true;
-  elements.messageInput.placeholder = "Message sending unavailable in deterministic backend";
+  elements.messageInput.placeholder = "Message unavailable";
   elements.composerStatus.textContent =
     state.composerNotice || "Message sending unavailable in deterministic backend.";
 }
