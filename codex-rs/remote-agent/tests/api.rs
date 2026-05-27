@@ -22,6 +22,7 @@ use tower::ServiceExt;
 
 use codex_remote_agent::Store;
 use codex_remote_agent::build_router;
+use codex_remote_agent::config::BackendMode;
 use codex_remote_agent::config::Config;
 use codex_remote_agent::models::ApprovalStatus;
 use codex_remote_agent::models::Session;
@@ -34,6 +35,8 @@ async fn test_app(temp_dir: &TempDir) -> Router {
         state_dir: Some(temp_dir.path().to_path_buf()),
         workspaces: Vec::new(),
         setup_token: Some("setup-secret".to_string()),
+        backend: BackendMode::Demo,
+        codex_command: "codex".to_string(),
     };
     let config = match Config::from_cli(cli).await {
         Ok(config) => config,
@@ -48,6 +51,8 @@ async fn test_app_with_workspaces(state_dir: PathBuf, workspaces: Vec<PathBuf>) 
         state_dir: Some(state_dir),
         workspaces,
         setup_token: Some("setup-secret".to_string()),
+        backend: BackendMode::Demo,
+        codex_command: "codex".to_string(),
     };
     let config = match Config::from_cli(cli).await {
         Ok(config) => config,
@@ -499,6 +504,8 @@ async fn setup_replay_without_configured_token_returns_conflict_after_restart() 
         state_dir: Some(temp_dir.path().to_path_buf()),
         workspaces: Vec::new(),
         setup_token: None,
+        backend: BackendMode::Demo,
+        codex_command: "codex".to_string(),
     };
     let config = Config::from_cli(cli).await.unwrap();
     let app = build_router(config);
@@ -567,6 +574,8 @@ async fn setup_requires_configured_setup_token() {
         state_dir: Some(temp_dir.path().to_path_buf()),
         workspaces: Vec::new(),
         setup_token: None,
+        backend: BackendMode::Demo,
+        codex_command: "codex".to_string(),
     };
     let config = Config::from_cli(cli).await.unwrap();
     let response = build_router(config)

@@ -96,12 +96,10 @@ pub fn build_router(config: Config) -> Router {
         Ok(store) => store,
         Err(error) => panic!("failed to create state store: {error}"),
     };
+    let backend = crate::backend::from_config(&config);
     let state = AppState {
         config,
-        sessions: SessionManager::new(
-            store.clone(),
-            std::sync::Arc::new(crate::backend::demo::DemoBackend::new()),
-        ),
+        sessions: SessionManager::new(store.clone(), backend),
         store,
     };
     Router::new()
@@ -590,6 +588,8 @@ mod tests {
             state_dir: Some(state_dir),
             workspaces: Vec::new(),
             setup_token: None,
+            backend: crate::config::BackendMode::Demo,
+            codex_command: "codex".to_string(),
         })
         .await?;
         let response = build_router(config)

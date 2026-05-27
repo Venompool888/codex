@@ -5,6 +5,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::config::BackendMode;
+use crate::config::Config;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BackendThread {
     pub(crate) thread_id: String,
@@ -50,4 +53,13 @@ pub(crate) trait CodexBackend: Send + Sync + 'static {
         message: String,
         sink: Arc<dyn BackendEventSink>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<BackendTurn>> + Send + '_>>;
+}
+
+pub(crate) fn from_config(config: &Config) -> Arc<dyn CodexBackend> {
+    match config.backend_mode() {
+        BackendMode::AppServer => Arc::new(app_server::AppServerBackend::new(
+            config.codex_command().to_string(),
+        )),
+        BackendMode::Demo => Arc::new(demo::DemoBackend::new()),
+    }
 }

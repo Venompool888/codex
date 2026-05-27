@@ -201,10 +201,6 @@ impl AppServerBackend {
         request_on_connection(&self.inner.next_id, &connection, method, params).await
     }
 
-    async fn notify(&self, method: &str, params: Value) -> anyhow::Result<()> {
-        let connection = self.ensure_connection().await?;
-        notify_on_connection(&connection, method, params).await
-    }
 }
 
 impl Clone for AppServerConnection {
