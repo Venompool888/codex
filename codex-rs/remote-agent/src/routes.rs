@@ -31,10 +31,13 @@ use crate::models::DiffSummary;
 use crate::models::FileEntry;
 use crate::models::Session;
 use crate::models::SessionEvent;
+use crate::models::SubmitMessageRequest;
+use crate::models::SubmitMessageResponse;
 use crate::models::Workspace;
 use crate::sessions::ApprovalDecision;
 use crate::sessions::ApproveError;
 use crate::sessions::SessionManager;
+use crate::sessions::SubmitMessageError;
 use crate::store::CompleteSetupError;
 use crate::workspaces::WorkspaceConfigEntry;
 use crate::workspaces::WorkspaceRoot;
@@ -93,9 +96,10 @@ pub fn build_router(config: Config) -> Router {
         Ok(store) => store,
         Err(error) => panic!("failed to create state store: {error}"),
     };
+    let backend = crate::backend::from_config(&config);
     let state = AppState {
         config,
-        sessions: SessionManager::new(store.clone()),
+        sessions: SessionManager::new(store.clone(), backend),
         store,
     };
     Router::new()
@@ -108,6 +112,10 @@ pub fn build_router(config: Config) -> Router {
         .route("/api/agent/logs", get(agent_logs))
         .route("/api/setup", post(setup))
         .route("/api/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/api/sessions/{session_id}/messages",
+            post(submit_session_message),
+        )
         .route("/api/sessions/{session_id}/events", get(session_events))
         .route(
             "/api/approvals/{approval_id}/approve",
@@ -248,6 +256,26 @@ async fn create_session(
         .await
         .map(Json)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn submit_session_message(
+    _auth: Authenticated,
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+    Json(request): Json<SubmitMessageRequest>,
+) -> Result<Json<SubmitMessageResponse>, StatusCode> {
+    state
+        .sessions
+        .submit_message(&session_id, request.message)
+        .await
+        .map(|()| Json(SubmitMessageResponse { accepted: true }))
+        .map_err(|error| match error {
+            SubmitMessageError::EmptyMessage => StatusCode::BAD_REQUEST,
+            SubmitMessageError::SessionNotFound => StatusCode::NOT_FOUND,
+            SubmitMessageError::MissingThread => StatusCode::CONFLICT,
+            SubmitMessageError::TurnAlreadyActive => StatusCode::CONFLICT,
+            SubmitMessageError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        })
 }
 
 async fn session_events(
@@ -560,6 +588,8 @@ mod tests {
             state_dir: Some(state_dir),
             workspaces: Vec::new(),
             setup_token: None,
+            backend: crate::config::BackendMode::Demo,
+            codex_command: "codex".to_string(),
         })
         .await?;
         let response = build_router(config)

@@ -57,7 +57,7 @@
               </div>
               <button type="button" class="icon-button sidebar-close" id="sidebarCloseButton" aria-label="Close sidebar">×</button>
             </div>
-            <div class="sidebar-summary" id="sidebarSummary">Deterministic backend</div>
+            <div class="sidebar-summary" id="sidebarSummary">Codex app-server</div>
             <div class="sidebar-actions">
               <button type="button" id="newSessionButton">New session</button>
               <button type="button" id="sidebarPaletteButton">Command Palette</button>
@@ -79,9 +79,9 @@
           <main class="session-surface" id="sessionSurface">
             <section class="session-scroll" id="eventStream" aria-label="Session events">Select a session to stream events.</section>
             <form id="messageForm" class="composer" aria-label="Message composer">
-              <input id="messageInput" name="message" type="text" placeholder="Message unavailable" disabled>
+              <input id="messageInput" name="message" type="text" placeholder="Ask Codex to change this workspace..." disabled>
               <button id="messageSend" type="submit" disabled>Send</button>
-              <div class="composer-status" id="composerStatus">Message sending unavailable in deterministic backend.</div>
+              <div class="composer-status" id="composerStatus">Ready when a session is selected.</div>
             </form>
           </main>
 

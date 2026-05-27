@@ -26,6 +26,26 @@ pub struct Session {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SessionMetadata {
+    pub session_id: String,
+    pub app_server_thread_id: Option<String>,
+    pub active_turn_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitMessageRequest {
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitMessageResponse {
+    pub accepted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SessionStatus {
     Running,
     WaitingForApproval,
@@ -71,6 +91,8 @@ pub struct ApprovalRequest {
     pub risk_summary: String,
     pub created_at: i64,
     pub status: ApprovalStatus,
+    #[serde(default)]
+    pub backend_request_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

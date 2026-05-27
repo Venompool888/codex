@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use clap::Parser;
+use clap::ValueEnum;
 
 use crate::store::ensure_private_state_dir;
 
@@ -19,6 +20,18 @@ pub struct Cli {
 
     #[arg(long, env = "CODEX_REMOTE_SETUP_TOKEN")]
     pub setup_token: Option<String>,
+
+    #[arg(long, value_enum, default_value_t = BackendMode::AppServer)]
+    pub backend: BackendMode,
+
+    #[arg(long, default_value = "codex", env = "CODEX_REMOTE_CODEX_COMMAND")]
+    pub codex_command: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum BackendMode {
+    AppServer,
+    Demo,
 }
 
 #[derive(Clone, Debug)]
@@ -27,6 +40,8 @@ pub struct Config {
     state_dir: PathBuf,
     workspaces: Vec<PathBuf>,
     setup_token: Option<String>,
+    backend: BackendMode,
+    codex_command: String,
 }
 
 impl Config {
@@ -42,6 +57,8 @@ impl Config {
             state_dir,
             workspaces: cli.workspaces,
             setup_token: cli.setup_token,
+            backend: cli.backend,
+            codex_command: cli.codex_command,
         })
     }
 
@@ -59,6 +76,14 @@ impl Config {
 
     pub fn setup_token(&self) -> Option<&str> {
         self.setup_token.as_deref()
+    }
+
+    pub fn backend_mode(&self) -> BackendMode {
+        self.backend
+    }
+
+    pub fn codex_command(&self) -> &str {
+        &self.codex_command
     }
 }
 
@@ -84,6 +109,8 @@ mod tests {
             state_dir: Some(state_dir.clone()),
             workspaces: Vec::new(),
             setup_token: Some("setup-secret".to_string()),
+            backend: BackendMode::AppServer,
+            codex_command: "codex".to_string(),
         })
         .await
         .unwrap();
@@ -92,5 +119,23 @@ mod tests {
             std::fs::metadata(state_dir).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    #[tokio::test]
+    async fn from_cli_defaults_to_app_server_backend() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::from_cli(Cli {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            state_dir: Some(temp_dir.path().join("state")),
+            workspaces: Vec::new(),
+            setup_token: Some("setup-secret".to_string()),
+            backend: BackendMode::AppServer,
+            codex_command: "codex".to_string(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(config.backend_mode(), BackendMode::AppServer);
+        assert_eq!(config.codex_command(), "codex");
     }
 }
