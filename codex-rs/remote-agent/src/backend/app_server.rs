@@ -76,8 +76,7 @@ pub(crate) fn map_notification(value: &Value) -> Option<MappedNotification> {
     let params = value.get("params")?;
     match method {
         "item/started"
-            if params.pointer("/item/type").and_then(Value::as_str)
-                == Some("commandExecution") =>
+            if params.pointer("/item/type").and_then(Value::as_str) == Some("commandExecution") =>
         {
             Some(MappedNotification {
                 thread_id: params.get("threadId")?.as_str()?.to_string(),
@@ -91,8 +90,7 @@ pub(crate) fn map_notification(value: &Value) -> Option<MappedNotification> {
             })
         }
         "item/completed"
-            if params.pointer("/item/type").and_then(Value::as_str)
-                == Some("commandExecution") =>
+            if params.pointer("/item/type").and_then(Value::as_str) == Some("commandExecution") =>
         {
             Some(MappedNotification {
                 thread_id: params.get("threadId")?.as_str()?.to_string(),
@@ -242,6 +240,10 @@ impl AppServerBackend {
         }
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "connection startup is serialized so app-server is initialized once"
+    )]
     async fn ensure_connection(&self) -> anyhow::Result<AppServerConnection> {
         let mut guard = self.inner.connection.lock().await;
         if let Some(connection) = guard.as_ref() {
@@ -275,8 +277,13 @@ impl AppServerBackend {
             thread_sessions,
         };
 
-        request_on_connection(&self.inner.next_id, &connection, "initialize", initialize_params())
-            .await?;
+        request_on_connection(
+            &self.inner.next_id,
+            &connection,
+            "initialize",
+            initialize_params(),
+        )
+        .await?;
         notify_on_connection(&connection, "initialized", json!({})).await?;
 
         *guard = Some(connection.clone());
@@ -287,7 +294,6 @@ impl AppServerBackend {
         let connection = self.ensure_connection().await?;
         request_on_connection(&self.inner.next_id, &connection, method, params).await
     }
-
 }
 
 impl Clone for AppServerConnection {
@@ -318,11 +324,7 @@ fn spawn_reader(
             }
             let Some(id) = value.get("id").and_then(Value::as_u64) else {
                 if let Some(mapped) = map_notification(&value) {
-                    let binding = thread_sessions
-                        .lock()
-                        .await
-                        .get(&mapped.thread_id)
-                        .cloned();
+                    let binding = thread_sessions.lock().await.get(&mapped.thread_id).cloned();
                     if let Some(binding) = binding {
                         let _ = binding.sink.emit(binding.session_id, mapped.event).await;
                     }
@@ -348,11 +350,7 @@ async fn handle_server_request(
     value: &Value,
 ) {
     if let Some(mapped) = map_server_request(value) {
-        let binding = thread_sessions
-            .lock()
-            .await
-            .get(&mapped.thread_id)
-            .cloned();
+        let binding = thread_sessions.lock().await.get(&mapped.thread_id).cloned();
         if let Some(binding) = binding {
             let _ = binding
                 .sink
@@ -432,9 +430,14 @@ async fn notify_on_connection(
     .await
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "writes to app-server stdin must be serialized"
+)]
 async fn write_json_line(stdin: &Arc<Mutex<ChildStdin>>, value: &Value) -> anyhow::Result<()> {
     let mut stdin = stdin.lock().await;
-    stdin.write_all(serde_json::to_string(value)?.as_bytes())
+    stdin
+        .write_all(serde_json::to_string(value)?.as_bytes())
         .await?;
     stdin.write_all(b"\n").await?;
     stdin.flush().await?;
@@ -472,9 +475,8 @@ impl CodexBackend for AppServerBackend {
         workspace_path: String,
         message: String,
         sink: Arc<dyn BackendEventSink>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = anyhow::Result<BackendTurn>> + Send + '_>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<BackendTurn>> + Send + '_>>
+    {
         Box::pin(async move {
             let connection = self.ensure_connection().await?;
             connection.thread_sessions.lock().await.insert(
@@ -512,8 +514,7 @@ impl CodexBackend for AppServerBackend {
         &self,
         request_id: u64,
         decision: BackendApprovalDecision,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>>
-    {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
         Box::pin(async move {
             let payload = match decision {
                 BackendApprovalDecision::Approve => json!({

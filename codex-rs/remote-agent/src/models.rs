@@ -91,6 +91,7 @@ pub struct ApprovalRequest {
     pub risk_summary: String,
     pub created_at: i64,
     pub status: ApprovalStatus,
+    #[serde(default)]
     pub backend_request_id: Option<u64>,
 }
 

@@ -1,5 +1,5 @@
-pub mod demo;
 pub mod app_server;
+pub mod demo;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -23,15 +23,21 @@ pub(crate) struct BackendTurn {
 pub(crate) enum BackendEvent {
     AssistantDelta(String),
     Status(String),
-    ToolStarted { command: String },
-    ToolCompleted { exit_code: i32 },
+    ToolStarted {
+        command: String,
+    },
+    ToolCompleted {
+        exit_code: i32,
+    },
     ApprovalRequested {
         request_id: u64,
         approval: BackendApprovalRequest,
     },
     DiffUpdated,
     Completed,
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

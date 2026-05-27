@@ -8,11 +8,11 @@ use anyhow::Context;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::Store;
 use crate::backend::BackendApprovalDecision;
 use crate::backend::BackendEvent;
 use crate::backend::BackendEventSink;
 use crate::backend::CodexBackend;
-use crate::Store;
 use crate::models::ApprovalStatus;
 use crate::models::Session;
 use crate::models::SessionEvent;
@@ -457,9 +457,10 @@ impl SessionManagerSink {
                     status: COMPLETED_STATUS_TEXT.to_string(),
                 },
             ),
-            BackendEvent::Failed { message } => {
-                (Some(SessionStatus::Failed), SessionEventKind::ErrorRaised { message })
-            }
+            BackendEvent::Failed { message } => (
+                Some(SessionStatus::Failed),
+                SessionEventKind::ErrorRaised { message },
+            ),
         };
         let event = SessionEvent {
             id: new_id(),
@@ -556,8 +557,7 @@ mod tests {
                 session_id: session.id.clone(),
                 app_server_thread_id: Some("demo-thread".to_string()),
                 active_turn_id: None,
-            }
-            )
+            })
         );
 
         let events = store.events(&session.id).await?;
@@ -595,7 +595,11 @@ mod tests {
             .await?;
 
         assert_eq!(
-            store.session_metadata(&session.id).await?.unwrap().active_turn_id,
+            store
+                .session_metadata(&session.id)
+                .await?
+                .unwrap()
+                .active_turn_id,
             None
         );
         assert_eq!(store.sessions().await?[0].status, SessionStatus::Completed);

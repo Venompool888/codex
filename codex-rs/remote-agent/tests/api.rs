@@ -178,7 +178,7 @@ async fn create_session_with_body(
 
 async fn insert_pending_approval(store: &Store, session_id: &str) -> String {
     let approval_id = "approval-1".to_string();
-    store
+    match store
         .upsert_approval(codex_remote_agent::models::ApprovalRequest {
             id: approval_id.clone(),
             session_id: session_id.to_string(),
@@ -190,7 +190,10 @@ async fn insert_pending_approval(store: &Store, session_id: &str) -> String {
             backend_request_id: None,
         })
         .await
-        .unwrap();
+    {
+        Ok(()) => {}
+        Err(error) => panic!("failed to insert pending approval: {error}"),
+    }
     approval_id
 }
 
@@ -1095,10 +1098,7 @@ async fn sse_events_includes_historical_events_with_token_query() {
     assert_eq!(events[1]["kind"]["type"], "statusText");
     assert_eq!(events[1]["kind"]["status"], "Ready.");
     assert_eq!(events[2]["kind"]["type"], "messageDelta");
-    assert_eq!(
-        events[2]["kind"]["content"],
-        "Remote Codex session ready."
-    );
+    assert_eq!(events[2]["kind"]["content"], "Remote Codex session ready.");
 }
 
 #[tokio::test]
