@@ -230,6 +230,7 @@ async fn serves_embedded_web_ui_assets() {
     for (path, content_type) in [
         ("/assets/styles.css", "text/css; charset=utf-8"),
         ("/assets/app.js", "application/javascript; charset=utf-8"),
+        ("/assets/favicon.svg", "image/svg+xml; charset=utf-8"),
     ] {
         let response = app
             .clone()

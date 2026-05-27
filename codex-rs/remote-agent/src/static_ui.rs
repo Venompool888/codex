@@ -9,6 +9,7 @@ use axum::response::IntoResponse;
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const STYLES_CSS: &str = include_str!("../static/styles.css");
 const APP_JS: &str = include_str!("../static/app.js");
+const FAVICON_SVG: &str = include_str!("../static/favicon.svg");
 
 pub(crate) async fn index() -> impl IntoResponse {
     static_response("text/html; charset=utf-8", INDEX_HTML)
@@ -23,6 +24,9 @@ pub(crate) async fn asset(Path(path): Path<String>) -> impl IntoResponse {
         "styles.css" => static_response("text/css; charset=utf-8", STYLES_CSS).into_response(),
         "app.js" => {
             static_response("application/javascript; charset=utf-8", APP_JS).into_response()
+        }
+        "favicon.svg" => {
+            static_response("image/svg+xml; charset=utf-8", FAVICON_SVG).into_response()
         }
         _ => missing_asset(),
     }
