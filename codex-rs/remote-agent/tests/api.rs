@@ -176,6 +176,24 @@ async fn create_session_with_body(
     post_json_with_token(app, "/api/sessions", token, body).await
 }
 
+async fn insert_pending_approval(store: &Store, session_id: &str) -> String {
+    let approval_id = "approval-1".to_string();
+    store
+        .upsert_approval(codex_remote_agent::models::ApprovalRequest {
+            id: approval_id.clone(),
+            session_id: session_id.to_string(),
+            action_type: "command".to_string(),
+            command: "git status --short".to_string(),
+            risk_summary: "Read-only repository status check.".to_string(),
+            created_at: 1,
+            status: ApprovalStatus::Pending,
+            backend_request_id: None,
+        })
+        .await
+        .unwrap();
+    approval_id
+}
+
 async fn run_git(repo: &Path, args: &[&str]) {
     let output = Command::new("git")
         .arg("-C")
@@ -788,7 +806,7 @@ async fn approvals_approve_updates_status_and_emits_completion_event() {
     let session_token = setup_and_extract_token(app.clone()).await;
     let session = create_session(app.clone(), &session_token).await;
     let store = Store::new(temp_dir.path().join("state")).unwrap();
-    let approval_id = store.approvals().await.unwrap()[0].id.clone();
+    let approval_id = insert_pending_approval(&store, session["id"].as_str().unwrap()).await;
 
     let response = post_json_with_token(
         app.clone(),
@@ -803,29 +821,29 @@ async fn approvals_approve_updates_status_and_emits_completion_event() {
     assert_eq!(approvals[0].status, ApprovalStatus::Approved);
     let events = store.events(session["id"].as_str().unwrap()).await.unwrap();
     assert_eq!(
-        &events[4..],
+        &events[3..],
         [
             codex_remote_agent::models::SessionEvent {
-                id: events[4].id.clone(),
-                session_id: events[4].session_id.clone(),
-                created_at: events[4].created_at,
+                id: events[3].id.clone(),
+                session_id: events[3].session_id.clone(),
+                created_at: events[3].created_at,
                 kind: SessionEventKind::ApprovalDecided {
                     approval_id: approval_id.clone(),
                     approved: true,
                 },
             },
             codex_remote_agent::models::SessionEvent {
-                id: events[5].id.clone(),
-                session_id: events[5].session_id.clone(),
-                created_at: events[5].created_at,
+                id: events[4].id.clone(),
+                session_id: events[4].session_id.clone(),
+                created_at: events[4].created_at,
                 kind: SessionEventKind::StatusText {
                     status: "Session completed.".to_string(),
                 },
             },
             codex_remote_agent::models::SessionEvent {
-                id: events[6].id.clone(),
-                session_id: events[6].session_id.clone(),
-                created_at: events[6].created_at,
+                id: events[5].id.clone(),
+                session_id: events[5].session_id.clone(),
+                created_at: events[5].created_at,
                 kind: SessionEventKind::ToolCallCompleted { exit_code: 0 },
             },
         ]
@@ -842,7 +860,7 @@ async fn double_approve_returns_conflict_and_emits_one_completion_event() {
     let session_token = setup_and_extract_token(app.clone()).await;
     let session = create_session(app.clone(), &session_token).await;
     let store = Store::new(temp_dir.path().join("state")).unwrap();
-    let approval_id = store.approvals().await.unwrap()[0].id.clone();
+    let approval_id = insert_pending_approval(&store, session["id"].as_str().unwrap()).await;
 
     let first = post_json_with_token(
         app.clone(),
@@ -885,7 +903,7 @@ async fn concurrent_approve_and_deny_has_one_success_and_one_terminal_event() {
     let session_token = setup_and_extract_token(app.clone()).await;
     let session = create_session(app.clone(), &session_token).await;
     let store = Store::new(temp_dir.path().join("state")).unwrap();
-    let approval_id = store.approvals().await.unwrap()[0].id.clone();
+    let approval_id = insert_pending_approval(&store, session["id"].as_str().unwrap()).await;
     let approve_uri = format!("/api/approvals/{approval_id}/approve");
     let deny_uri = format!("/api/approvals/{approval_id}/deny");
 
@@ -936,7 +954,7 @@ async fn approvals_deny_updates_status_and_emits_error_event() {
     let session_token = setup_and_extract_token(app.clone()).await;
     let session = create_session(app.clone(), &session_token).await;
     let store = Store::new(temp_dir.path().join("state")).unwrap();
-    let approval_id = store.approvals().await.unwrap()[0].id.clone();
+    let approval_id = insert_pending_approval(&store, session["id"].as_str().unwrap()).await;
 
     let response = post_json_with_token(
         app.clone(),
@@ -951,29 +969,29 @@ async fn approvals_deny_updates_status_and_emits_error_event() {
     assert_eq!(approvals[0].status, ApprovalStatus::Denied);
     let events = store.events(session["id"].as_str().unwrap()).await.unwrap();
     assert_eq!(
-        &events[4..],
+        &events[3..],
         [
             codex_remote_agent::models::SessionEvent {
-                id: events[4].id.clone(),
-                session_id: events[4].session_id.clone(),
-                created_at: events[4].created_at,
+                id: events[3].id.clone(),
+                session_id: events[3].session_id.clone(),
+                created_at: events[3].created_at,
                 kind: SessionEventKind::ApprovalDecided {
                     approval_id: approval_id.clone(),
                     approved: false,
                 },
             },
             codex_remote_agent::models::SessionEvent {
-                id: events[5].id.clone(),
-                session_id: events[5].session_id.clone(),
-                created_at: events[5].created_at,
+                id: events[4].id.clone(),
+                session_id: events[4].session_id.clone(),
+                created_at: events[4].created_at,
                 kind: SessionEventKind::StatusText {
                     status: "Session failed.".to_string(),
                 },
             },
             codex_remote_agent::models::SessionEvent {
-                id: events[6].id.clone(),
-                session_id: events[6].session_id.clone(),
-                created_at: events[6].created_at,
+                id: events[5].id.clone(),
+                session_id: events[5].session_id.clone(),
+                created_at: events[5].created_at,
                 kind: SessionEventKind::ErrorRaised {
                     message: "Command denied by user.".to_string()
                 },
@@ -1070,16 +1088,15 @@ async fn sse_events_includes_historical_events_with_token_query() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = String::from_utf8(body.to_vec()).unwrap();
     let events = sse_data_events(&body);
-    assert_eq!(events.len(), 4);
+    assert_eq!(events.len(), 3);
     assert_eq!(events[0]["kind"]["type"], "sessionCreated");
     assert_eq!(events[1]["kind"]["type"], "statusText");
-    assert_eq!(events[1]["kind"]["status"], "Waiting for approval.");
+    assert_eq!(events[1]["kind"]["status"], "Ready.");
     assert_eq!(events[2]["kind"]["type"], "messageDelta");
     assert_eq!(
         events[2]["kind"]["content"],
-        "Remote Codex session started."
+        "Remote Codex session ready."
     );
-    assert_eq!(events[3]["kind"]["type"], "approvalRequested");
 }
 
 #[tokio::test]
@@ -1089,7 +1106,7 @@ async fn sse_events_delivers_live_events_after_connect() {
     let session_token = setup_and_extract_token(app.clone()).await;
     let session = create_session(app.clone(), &session_token).await;
     let store = Store::new(temp_dir.path().join("state")).unwrap();
-    let approval_id = store.approvals().await.unwrap()[0].id.clone();
+    let approval_id = insert_pending_approval(&store, session["id"].as_str().unwrap()).await;
     let session_id = session["id"].as_str().unwrap().to_string();
 
     let sse_app = app.clone();

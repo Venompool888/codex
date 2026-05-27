@@ -25,9 +25,26 @@ pub(crate) enum BackendEvent {
     Status(String),
     ToolStarted { command: String },
     ToolCompleted { exit_code: i32 },
+    ApprovalRequested {
+        request_id: u64,
+        approval: BackendApprovalRequest,
+    },
     DiffUpdated,
     Completed,
     Failed { message: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BackendApprovalRequest {
+    pub(crate) action_type: String,
+    pub(crate) command: String,
+    pub(crate) risk_summary: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BackendApprovalDecision {
+    Approve,
+    Deny,
 }
 
 pub(crate) trait BackendEventSink: Send + Sync + 'static {
@@ -53,6 +70,12 @@ pub(crate) trait CodexBackend: Send + Sync + 'static {
         message: String,
         sink: Arc<dyn BackendEventSink>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<BackendTurn>> + Send + '_>>;
+
+    fn respond_approval(
+        &self,
+        request_id: u64,
+        decision: BackendApprovalDecision,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>>;
 }
 
 pub(crate) fn from_config(config: &Config) -> Arc<dyn CodexBackend> {

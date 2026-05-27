@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::backend::BackendEvent;
 use crate::backend::BackendEventSink;
+use crate::backend::BackendApprovalDecision;
 use crate::backend::BackendThread;
 use crate::backend::BackendTurn;
 use crate::backend::CodexBackend;
@@ -50,5 +51,13 @@ impl CodexBackend for DemoBackend {
                 turn_id: "demo-turn".to_string(),
             })
         })
+    }
+
+    fn respond_approval(
+        &self,
+        _request_id: u64,
+        _decision: BackendApprovalDecision,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
     }
 }

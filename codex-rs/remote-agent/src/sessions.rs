@@ -8,6 +8,7 @@ use anyhow::Context;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::backend::BackendApprovalDecision;
 use crate::backend::BackendEvent;
 use crate::backend::BackendEventSink;
 use crate::backend::CodexBackend;
@@ -302,6 +303,23 @@ impl SessionManager {
         approval_id: &str,
         decision: ApprovalDecision,
     ) -> Result<(), ApproveError> {
+        let approval = self
+            .store
+            .approvals()
+            .await?
+            .into_iter()
+            .find(|approval| approval.id == approval_id)
+            .ok_or(ApproveError::NotFound)?;
+        if let Some(request_id) = approval.backend_request_id {
+            let backend_decision = match decision {
+                ApprovalDecision::Approve => BackendApprovalDecision::Approve,
+                ApprovalDecision::Deny => BackendApprovalDecision::Deny,
+            };
+            self.backend
+                .respond_approval(request_id, backend_decision)
+                .await
+                .map_err(ApproveError::Store)?;
+        }
         let event_created_at = unix_timestamp()?;
         let decision_event = SessionEvent {
             id: new_id(),
@@ -409,6 +427,28 @@ impl SessionManagerSink {
             }
             BackendEvent::ToolCompleted { exit_code } => {
                 (None, SessionEventKind::ToolCallCompleted { exit_code })
+            }
+            BackendEvent::ApprovalRequested {
+                request_id,
+                approval,
+            } => {
+                let approval_id = new_id();
+                self.store
+                    .upsert_approval(crate::models::ApprovalRequest {
+                        id: approval_id.clone(),
+                        session_id: session_id.to_string(),
+                        action_type: approval.action_type,
+                        command: approval.command,
+                        risk_summary: approval.risk_summary,
+                        created_at: now,
+                        status: ApprovalStatus::Pending,
+                        backend_request_id: Some(request_id),
+                    })
+                    .await?;
+                (
+                    Some(SessionStatus::WaitingForApproval),
+                    SessionEventKind::ApprovalRequested { approval_id },
+                )
             }
             BackendEvent::DiffUpdated => (None, SessionEventKind::DiffUpdated),
             BackendEvent::Completed => (
@@ -617,7 +657,7 @@ mod tests {
         let session = manager
             .start_session("workspace-1".to_string(), "Build feature".to_string())
             .await?;
-        let approval_id = store.approvals().await?[0].id.clone();
+        let approval_id = insert_pending_approval(&store, &session.id).await?;
 
         manager
             .approve(&approval_id, ApprovalDecision::Approve)
@@ -654,7 +694,7 @@ mod tests {
         let session = manager
             .start_session("workspace-1".to_string(), "Build feature".to_string())
             .await?;
-        let approval_id = store.approvals().await?[0].id.clone();
+        let approval_id = insert_pending_approval(&store, &session.id).await?;
 
         let (first, second) = tokio::join!(
             manager.approve(&approval_id, ApprovalDecision::Approve),
@@ -709,5 +749,22 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    async fn insert_pending_approval(store: &Store, session_id: &str) -> anyhow::Result<String> {
+        let approval_id = "approval-1".to_string();
+        store
+            .upsert_approval(crate::models::ApprovalRequest {
+                id: approval_id.clone(),
+                session_id: session_id.to_string(),
+                action_type: "command".to_string(),
+                command: "git status --short".to_string(),
+                risk_summary: "Read-only repository status check.".to_string(),
+                created_at: 1,
+                status: ApprovalStatus::Pending,
+                backend_request_id: None,
+            })
+            .await?;
+        Ok(approval_id)
     }
 }

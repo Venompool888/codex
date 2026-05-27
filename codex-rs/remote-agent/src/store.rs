@@ -1037,6 +1037,7 @@ mod tests {
             risk_summary: "Runs tests".to_string(),
             created_at: 1,
             status: ApprovalStatus::Pending,
+            backend_request_id: None,
         };
         let other_session_approval = ApprovalRequest {
             session_id: "session-2".to_string(),
@@ -1180,6 +1181,7 @@ mod tests {
             risk_summary: "Read-only repository status check.".to_string(),
             created_at: 1,
             status: ApprovalStatus::Pending,
+            backend_request_id: None,
         }
     }
 

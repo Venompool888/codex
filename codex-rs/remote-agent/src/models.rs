@@ -91,6 +91,7 @@ pub struct ApprovalRequest {
     pub risk_summary: String,
     pub created_at: i64,
     pub status: ApprovalStatus,
+    pub backend_request_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

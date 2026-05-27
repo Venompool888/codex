@@ -14,6 +14,8 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
+use crate::backend::BackendApprovalDecision;
+use crate::backend::BackendApprovalRequest;
 use crate::backend::BackendEvent;
 use crate::backend::BackendEventSink;
 use crate::backend::BackendThread;
@@ -73,6 +75,40 @@ pub(crate) fn map_notification(value: &Value) -> Option<MappedNotification> {
     let method = value.get("method")?.as_str()?;
     let params = value.get("params")?;
     match method {
+        "item/started"
+            if params.pointer("/item/type").and_then(Value::as_str)
+                == Some("commandExecution") =>
+        {
+            Some(MappedNotification {
+                thread_id: params.get("threadId")?.as_str()?.to_string(),
+                turn_id: params
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                event: BackendEvent::ToolStarted {
+                    command: params.pointer("/item/command")?.as_str()?.to_string(),
+                },
+            })
+        }
+        "item/completed"
+            if params.pointer("/item/type").and_then(Value::as_str)
+                == Some("commandExecution") =>
+        {
+            Some(MappedNotification {
+                thread_id: params.get("threadId")?.as_str()?.to_string(),
+                turn_id: params
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                event: BackendEvent::ToolCompleted {
+                    exit_code: params
+                        .pointer("/item/exitCode")
+                        .and_then(Value::as_i64)
+                        .and_then(|value| i32::try_from(value).ok())
+                        .unwrap_or(-1),
+                },
+            })
+        }
         "item/agentMessage/delta" => Some(MappedNotification {
             thread_id: params.get("threadId")?.as_str()?.to_string(),
             turn_id: params
@@ -121,6 +157,52 @@ pub(crate) fn map_notification(value: &Value) -> Option<MappedNotification> {
                 .and_then(Value::as_str)
                 .map(str::to_string),
             event: BackendEvent::DiffUpdated,
+        }),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MappedServerRequest {
+    pub(crate) request_id: u64,
+    pub(crate) thread_id: String,
+    pub(crate) approval: BackendApprovalRequest,
+}
+
+pub(crate) fn map_server_request(value: &Value) -> Option<MappedServerRequest> {
+    let method = value.get("method")?.as_str()?;
+    let request_id = value.get("id")?.as_u64()?;
+    let params = value.get("params")?;
+    match method {
+        "item/commandExecution/requestApproval" => Some(MappedServerRequest {
+            request_id,
+            thread_id: params.get("threadId")?.as_str()?.to_string(),
+            approval: BackendApprovalRequest {
+                action_type: "command".to_string(),
+                command: params
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or("network access")
+                    .to_string(),
+                risk_summary: params
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Codex requests permission to continue.")
+                    .to_string(),
+            },
+        }),
+        "item/fileChange/requestApproval" => Some(MappedServerRequest {
+            request_id,
+            thread_id: params.get("threadId")?.as_str()?.to_string(),
+            approval: BackendApprovalRequest {
+                action_type: "fileChange".to_string(),
+                command: "apply file changes".to_string(),
+                risk_summary: params
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Codex requests permission to apply file changes.")
+                    .to_string(),
+            },
         }),
         _ => None,
     }
@@ -181,7 +263,12 @@ impl AppServerBackend {
         let stdout = child.stdout.take().context("app-server stdout missing")?;
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let thread_sessions = Arc::new(Mutex::new(HashMap::new()));
-        spawn_reader(stdout, pending.clone(), thread_sessions.clone());
+        spawn_reader(
+            stdout,
+            stdin.clone(),
+            pending.clone(),
+            thread_sessions.clone(),
+        );
         let connection = AppServerConnection {
             stdin,
             pending,
@@ -215,6 +302,7 @@ impl Clone for AppServerConnection {
 
 fn spawn_reader(
     stdout: tokio::process::ChildStdout,
+    stdin: Arc<Mutex<ChildStdin>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<anyhow::Result<Value>>>>>,
     thread_sessions: Arc<Mutex<HashMap<String, ThreadBinding>>>,
 ) {
@@ -224,6 +312,10 @@ fn spawn_reader(
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            if value.get("method").is_some() && value.get("id").is_some() {
+                handle_server_request(&stdin, &thread_sessions, &value).await;
+                continue;
+            }
             let Some(id) = value.get("id").and_then(Value::as_u64) else {
                 if let Some(mapped) = map_notification(&value) {
                     let binding = thread_sessions
@@ -248,6 +340,67 @@ fn spawn_reader(
             let _ = sender.send(result);
         }
     });
+}
+
+async fn handle_server_request(
+    stdin: &Arc<Mutex<ChildStdin>>,
+    thread_sessions: &Arc<Mutex<HashMap<String, ThreadBinding>>>,
+    value: &Value,
+) {
+    if let Some(mapped) = map_server_request(value) {
+        let binding = thread_sessions
+            .lock()
+            .await
+            .get(&mapped.thread_id)
+            .cloned();
+        if let Some(binding) = binding {
+            let _ = binding
+                .sink
+                .emit(
+                    binding.session_id,
+                    BackendEvent::ApprovalRequested {
+                        request_id: mapped.request_id,
+                        approval: mapped.approval,
+                    },
+                )
+                .await;
+        }
+        return;
+    }
+
+    let Some(request_id) = value.get("id").and_then(Value::as_u64) else {
+        return;
+    };
+    let _ = write_json_line(
+        stdin,
+        &json!({
+            "id": request_id,
+            "result": {
+                "decision": "decline",
+            },
+        }),
+    )
+    .await;
+
+    let Some(thread_id) = value.pointer("/params/threadId").and_then(Value::as_str) else {
+        return;
+    };
+    let method = value
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let binding = thread_sessions.lock().await.get(thread_id).cloned();
+    if let Some(binding) = binding {
+        let _ = binding
+            .sink
+            .emit(
+                binding.session_id,
+                BackendEvent::Failed {
+                    message: format!("Unsupported approval request: {method}"),
+                },
+            )
+            .await;
+    }
 }
 
 async fn request_on_connection(
@@ -352,6 +505,32 @@ impl CodexBackend for AppServerBackend {
             )
             .await?;
             Ok(BackendTurn { turn_id })
+        })
+    }
+
+    fn respond_approval(
+        &self,
+        request_id: u64,
+        decision: BackendApprovalDecision,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let payload = match decision {
+                BackendApprovalDecision::Approve => json!({
+                    "id": request_id,
+                    "result": {
+                        "decision": "accept",
+                    },
+                }),
+                BackendApprovalDecision::Deny => json!({
+                    "id": request_id,
+                    "result": {
+                        "decision": "decline",
+                    },
+                }),
+            };
+            let connection = self.ensure_connection().await?;
+            write_json_line(&connection.stdin, &payload).await
         })
     }
 }
@@ -490,6 +669,32 @@ mod tests {
                 turn_id: Some("turn_456".to_string()),
                 event: BackendEvent::Failed {
                     message: "quota exceeded".to_string(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn maps_command_approval_request() {
+        assert_eq!(
+            map_server_request(&json!({
+                "id": 44,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "thr_123",
+                    "turnId": "turn_456",
+                    "itemId": "item_1",
+                    "command": "cargo test",
+                    "reason": "Run project tests"
+                }
+            })),
+            Some(MappedServerRequest {
+                request_id: 44,
+                thread_id: "thr_123".to_string(),
+                approval: BackendApprovalRequest {
+                    action_type: "command".to_string(),
+                    command: "cargo test".to_string(),
+                    risk_summary: "Run project tests".to_string(),
                 },
             })
         );
